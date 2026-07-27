@@ -1,0 +1,39 @@
+{
+  "name": "qicode",
+  "version": "0.1.0",
+  "description": "A terminal-first AI coding assistant.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "qicode": "./dist/main.js"
+  },
+  "scripts": {
+    "dev": "tsx src/main.tsx",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "packageManager": "pnpm@10.14.0",
+  "dependencies": {
+    "chalk": "^6.0.0",
+    "ink": "^7.1.1",
+    "js-yaml": "^5.2.2",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0",
+    "react": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

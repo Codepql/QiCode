@@ -1,0 +1,119 @@
+import { describe, expect, it } from "vitest";
+import { Conversation } from "../../src/conversation/conversation.js";
+import type {
+  ConversationMessage,
+  ThinkingBlock,
+} from "../../src/conversation/types.js";
+
+describe("Conversation", () => {
+  it("stores user and assistant messages in order", () => {
+    const conversation = new Conversation();
+
+    conversation.addUserMessage("Hello");
+    conversation.addAssistantMessage([{ type: "text", text: "Hi" }]);
+
+    expect(conversation.getMessages()).toEqual([
+      { role: "user", content: [{ type: "text", text: "Hello" }] },
+      { role: "assistant", content: [{ type: "text", text: "Hi" }] },
+    ]);
+  });
+
+  it("stores thinking and text blocks in their original order", () => {
+    const conversation = new Conversation();
+    const thinking: ThinkingBlock = {
+      type: "thinking",
+      thinking: "private reasoning",
+      signature: "signed-block",
+      hidden: true,
+    };
+
+    conversation.addAssistantMessage([
+      thinking,
+      { type: "text", text: "Visible answer" },
+    ]);
+
+    expect(conversation.getMessages()[0]).toEqual({
+      role: "assistant",
+      content: [thinking, { type: "text", text: "Visible answer" }],
+    });
+  });
+
+  it("returns deep copies so callers cannot mutate internal history", () => {
+    const conversation = new Conversation();
+    conversation.addUserMessage("Original question");
+
+    const firstRead = conversation.getMessages();
+    firstRead.push({
+      role: "assistant",
+      content: [{ type: "text", text: "Injected response" }],
+    });
+    const firstBlock = firstRead[0]?.content[0];
+    if (firstBlock?.type === "text") {
+      firstBlock.text = "Mutated question";
+    }
+
+    expect(conversation.getMessages()).toEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "Original question" }],
+      },
+    ]);
+  });
+
+  it("does not retain mutable assistant blocks owned by the caller", () => {
+    const conversation = new Conversation();
+    const blocks: ConversationMessage["content"] = [
+      { type: "text", text: "Original answer" },
+    ];
+
+    conversation.addAssistantMessage(blocks);
+    const block = blocks[0];
+    if (block?.type === "text") {
+      block.text = "Changed outside";
+    }
+
+    expect(conversation.getMessages()[0]?.content).toEqual([
+      { type: "text", text: "Original answer" },
+    ]);
+  });
+
+  it("returns only text blocks for visible rendering", () => {
+    const message: ConversationMessage = {
+      role: "assistant",
+      content: [
+        {
+          type: "thinking",
+          thinking: "private reasoning",
+          signature: "signed-block",
+          hidden: true,
+        },
+        { type: "text", text: "First paragraph" },
+        { type: "text", text: "Second paragraph" },
+      ],
+    };
+
+    expect(Conversation.visibleText(message)).toBe(
+      "First paragraphSecond paragraph",
+    );
+  });
+
+  it("rejects empty user messages and empty assistant content", () => {
+    const conversation = new Conversation();
+
+    expect(() => conversation.addUserMessage("   ")).toThrow(
+      "User message must not be empty",
+    );
+    expect(() => conversation.addAssistantMessage([])).toThrow(
+      "Assistant message must contain at least one block",
+    );
+  });
+
+  it("can clear all in-memory history", () => {
+    const conversation = new Conversation();
+    conversation.addUserMessage("Temporary message");
+
+    conversation.clear();
+
+    expect(conversation.getMessages()).toEqual([]);
+  });
+});
