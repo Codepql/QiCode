@@ -1,6 +1,7 @@
 import type {
   ConversationBlock,
   ConversationMessage,
+  ToolResultBlock,
 } from "./types.js";
 
 export class Conversation {
@@ -28,6 +29,17 @@ export class Conversation {
     });
   }
 
+  addToolResultsMessage(results: readonly ToolResultBlock[]): void {
+    if (results.length === 0) {
+      throw new Error("Tool results message must contain at least one result");
+    }
+
+    this.#messages.push({
+      role: "user",
+      content: results.map(cloneBlock),
+    });
+  }
+
   getMessages(): ConversationMessage[] {
     return this.#messages.map(cloneMessage);
   }
@@ -52,12 +64,29 @@ function cloneMessage(message: ConversationMessage): ConversationMessage {
 }
 
 function cloneBlock(block: ConversationBlock): ConversationBlock {
-  return block.type === "text"
-    ? { type: "text", text: block.text }
-    : {
+  switch (block.type) {
+    case "text":
+      return { type: "text", text: block.text };
+    case "thinking":
+      return {
         type: "thinking",
         thinking: block.thinking,
         signature: block.signature,
         hidden: true,
       };
+    case "tool_use":
+      return {
+        type: "tool_use",
+        id: block.id,
+        name: block.name,
+        input: structuredClone(block.input),
+      };
+    case "tool_result":
+      return {
+        type: "tool_result",
+        toolUseId: block.toolUseId,
+        content: block.content,
+        isError: block.isError,
+      };
+  }
 }

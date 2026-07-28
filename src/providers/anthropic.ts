@@ -46,6 +46,7 @@ export class AnthropicProvider implements Provider {
     }
 
     const thinkingBlocks = new Map<number, { thinking: string; signature: string }>();
+    const toolCalls = new Map<number, { id: string; name: string; argumentsJson: string }>();
     let stopReason: string | undefined;
     try {
       for await (const message of parseSSE(
@@ -57,7 +58,16 @@ export class AnthropicProvider implements Provider {
 
         if (type === "message_start") {
           const inputTokens = numberAt(payload, "message", "usage", "input_tokens");
-          if (inputTokens !== undefined) yield { type: "usage", inputTokens };
+          const cacheReadInputTokens = numberAt(payload, "message", "usage", "cache_read_input_tokens");
+          const cacheCreationInputTokens = numberAt(payload, "message", "usage", "cache_creation_input_tokens");
+          if (inputTokens !== undefined || cacheReadInputTokens !== undefined || cacheCreationInputTokens !== undefined) {
+            yield {
+              type: "usage",
+              ...(inputTokens === undefined ? {} : { inputTokens }),
+              ...(cacheReadInputTokens === undefined ? {} : { cacheReadInputTokens }),
+              ...(cacheCreationInputTokens === undefined ? {} : { cacheCreationInputTokens }),
+            };
+          }
         } else if (type === "content_block_start") {
           const index = numberValue(payload.index);
           const block = recordValue(payload.content_block);
@@ -66,6 +76,14 @@ export class AnthropicProvider implements Provider {
               thinking: stringValue(block?.thinking) ?? "",
               signature: stringValue(block?.signature) ?? "",
             });
+          } else if (index !== undefined && stringValue(block?.type) === "tool_use") {
+            const id = stringValue(block?.id);
+            const name = stringValue(block?.name);
+            if (!id || !name) {
+              throw new ProviderResponseError("Anthropic tool use block is missing id or name");
+            }
+            toolCalls.set(index, { id, name, argumentsJson: "" });
+            yield { type: "tool_call_start", toolId: id, toolName: name };
           }
         } else if (type === "content_block_delta") {
           const index = numberValue(payload.index);
@@ -80,6 +98,15 @@ export class AnthropicProvider implements Provider {
             if (thinking) yield { type: "thinking_delta", thinking };
           } else if (deltaType === "signature_delta" && index !== undefined) {
             getThinking(thinkingBlocks, index).signature += stringValue(delta?.signature) ?? "";
+          } else if (deltaType === "input_json_delta" && index !== undefined) {
+            const argumentsDelta = stringValue(delta?.partial_json) ?? "";
+            const toolCall = toolCalls.get(index);
+            if (toolCall) {
+              toolCall.argumentsJson += argumentsDelta;
+              if (argumentsDelta) {
+                yield { type: "tool_call_delta", toolId: toolCall.id, argumentsDelta };
+              }
+            }
           }
         } else if (type === "content_block_stop") {
           const index = numberValue(payload.index);
@@ -91,6 +118,16 @@ export class AnthropicProvider implements Provider {
               signature: block.signature,
             };
             thinkingBlocks.delete(index!);
+          }
+          const toolCall = index === undefined ? undefined : toolCalls.get(index);
+          if (toolCall) {
+            yield {
+              type: "tool_call_complete",
+              toolId: toolCall.id,
+              toolName: toolCall.name,
+              arguments: parseToolArguments(toolCall.argumentsJson),
+            };
+            toolCalls.delete(index!);
           }
         } else if (type === "message_delta") {
           const outputTokens = numberAt(payload, "usage", "output_tokens");
@@ -119,6 +156,15 @@ export class AnthropicProvider implements Provider {
       ...(this.config.thinking
         ? { thinking: { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS } }
         : {}),
+      ...(request.tools === undefined || request.tools.length === 0
+        ? {}
+        : {
+            tools: request.tools.map((tool) => ({
+              name: tool.name,
+              description: tool.description,
+              input_schema: tool.inputSchema,
+            })),
+          }),
     };
   }
 }
@@ -127,24 +173,48 @@ function toAnthropicMessage(message: ConversationMessage): Record<string, unknow
   const content: Array<
     | { type: "text"; text: string }
     | { type: "thinking"; thinking: string; signature: string }
+    | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
+    | { type: "tool_result"; tool_use_id: string; content: string; is_error: boolean }
   > = [];
 
   for (const block of message.content) {
     if (block.type === "text") {
       content.push({ type: "text", text: block.text });
-    } else if (message.role === "assistant") {
+    } else if (block.type === "thinking" && message.role === "assistant") {
       content.push({
         type: "thinking",
         thinking: block.thinking,
         signature: block.signature,
       });
+    } else if (block.type === "tool_use" && message.role === "assistant") {
+      content.push({ type: "tool_use", id: block.id, name: block.name, input: block.input });
+    } else if (block.type === "tool_result" && message.role === "user") {
+      content.push({
+        type: "tool_result",
+        tool_use_id: block.toolUseId,
+        content: block.content,
+        is_error: block.isError,
+      });
     }
   }
+
+  if (content.length === 0) content.push({ type: "text", text: "" });
 
   return {
     role: message.role,
     content,
   };
+}
+
+function parseToolArguments(argumentsJson: string): Record<string, unknown> {
+  if (argumentsJson.trim() === "") return {};
+  try {
+    const value: unknown = JSON.parse(argumentsJson);
+    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+  } catch {}
+  return {};
 }
 
 function getThinking(

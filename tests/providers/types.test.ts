@@ -20,6 +20,14 @@ describe("Provider contract", () => {
       config,
       async *stream(_request: ChatRequest): AsyncIterable<StreamEvent> {
         yield { type: "text_delta", text: "Hello" };
+        yield { type: "tool_call_start", toolId: "tool-1", toolName: "ReadFile" };
+        yield { type: "tool_call_delta", toolId: "tool-1", argumentsDelta: "{\"file_" };
+        yield {
+          type: "tool_call_complete",
+          toolId: "tool-1",
+          toolName: "ReadFile",
+          arguments: { file_path: "README.md" },
+        };
         yield { type: "usage", inputTokens: 4, outputTokens: 1 };
         yield { type: "done", stopReason: "end_turn" };
       },
@@ -27,6 +35,17 @@ describe("Provider contract", () => {
     const request: ChatRequest = {
       systemPrompt: "You are QiCode.",
       messages: [],
+      tools: [
+        {
+          name: "ReadFile",
+          description: "读取文件",
+          inputSchema: {
+            type: "object",
+            properties: { file_path: { type: "string" } },
+            required: ["file_path"],
+          },
+        },
+      ],
     };
 
     const events: StreamEvent[] = [];
@@ -36,6 +55,14 @@ describe("Provider contract", () => {
 
     expect(events).toEqual([
       { type: "text_delta", text: "Hello" },
+      { type: "tool_call_start", toolId: "tool-1", toolName: "ReadFile" },
+      { type: "tool_call_delta", toolId: "tool-1", argumentsDelta: "{\"file_" },
+      {
+        type: "tool_call_complete",
+        toolId: "tool-1",
+        toolName: "ReadFile",
+        arguments: { file_path: "README.md" },
+      },
       { type: "usage", inputTokens: 4, outputTokens: 1 },
       { type: "done", stopReason: "end_turn" },
     ]);

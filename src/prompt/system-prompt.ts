@@ -1,8 +1,12 @@
+import { executingActionsSection, usingToolsSection } from "./sections.js";
+
 export function buildSystemPrompt(workDir: string, date = new Date()): string {
   return [
-    "You are QiCode, a terminal-based AI assistant.",
-    "Answer clearly and concisely. This stage supports conversation only; do not claim to use tools or edit files.",
-    `Current date: ${date.toISOString().slice(0, 10)}`,
-    `Working directory: ${workDir}`,
-  ].join("\n");
+    "你是 QiCode，一个运行在终端中的 AI 助手。",
+    "请清晰、简洁地回答问题。需要读取、搜索、修改文件或执行命令时，应使用可用工具，而不是假装已经完成操作。",
+    `当前日期：${date.toISOString().slice(0, 10)}`,
+    `当前工作目录：${workDir}`,
+    usingToolsSection(),
+    executingActionsSection(),
+  ].join("\n\n");
 }

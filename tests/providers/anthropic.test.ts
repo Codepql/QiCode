@@ -61,6 +61,46 @@ describe("AnthropicProvider", () => {
       { type: "done" },
     ]);
   });
+
+  it("injects tools, joins streamed JSON arguments, and maps tool history", async () => {
+    let captured: RequestInit | undefined;
+    const fetchImpl = (async (_input: string | URL | Request, init?: RequestInit) => {
+      captured = init;
+      return response([
+        event({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tool-1", name: "ReadFile" } }),
+        event({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{\"file_" } }),
+        event({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "path\":\"README.md\"}" } }),
+        event({ type: "content_block_stop", index: 0 }),
+        event({ type: "message_delta", delta: { stop_reason: "tool_use" } }),
+        event({ type: "message_stop" }),
+      ]);
+    }) as typeof fetch;
+    const provider = new AnthropicProvider(config, fetchImpl);
+
+    const events = await collect(provider.stream({
+      systemPrompt: "system",
+      tools: [{ name: "ReadFile", description: "读取文件", inputSchema: { type: "object" } }],
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "old-tool", name: "ReadFile", input: { file_path: "old.md" } }] },
+        { role: "user", content: [{ type: "tool_result", toolUseId: "old-tool", content: "old content", isError: false }] },
+      ],
+    }));
+
+    expect(JSON.parse(String(captured?.body))).toMatchObject({
+      tools: [{ name: "ReadFile", description: "读取文件", input_schema: { type: "object" } }],
+      messages: [
+        { role: "assistant", content: [{ type: "tool_use", id: "old-tool", input: { file_path: "old.md" } }] },
+        { role: "user", content: [{ type: "tool_result", tool_use_id: "old-tool", content: "old content", is_error: false }] },
+      ],
+    });
+    expect(events).toEqual([
+      { type: "tool_call_start", toolId: "tool-1", toolName: "ReadFile" },
+      { type: "tool_call_delta", toolId: "tool-1", argumentsDelta: "{\"file_" },
+      { type: "tool_call_delta", toolId: "tool-1", argumentsDelta: "path\":\"README.md\"}" },
+      { type: "tool_call_complete", toolId: "tool-1", toolName: "ReadFile", arguments: { file_path: "README.md" } },
+      { type: "done", stopReason: "tool_use" },
+    ]);
+  });
 });
 
 function event(value: unknown): string { return `data: ${JSON.stringify(value)}\n\n`; }
