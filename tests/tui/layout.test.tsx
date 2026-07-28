@@ -57,8 +57,8 @@ describe("TUI layout", () => {
   });
 
   it("shows unknown usage as dashes", () => {
-    const view = render(<StatusBar model="gpt" />);
-    expect(view.lastFrame()).toContain("in - · out -");
+    const view = render(<StatusBar mode="default" />);
+    expect(view.lastFrame()).toContain("default · ↑ - · ↓ -");
   });
 
   it("removes terminal control sequences while preserving newlines and tabs", () => {

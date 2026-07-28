@@ -1,6 +1,6 @@
 # QiCode 第02阶段任务清单：工具系统
 
-> 状态：未开始。只有用户明确说“开发第 02 章”后才执行。
+> 状态：已实现并校准至当前代码（2026-07-28）。未完成的真实 Provider / TUI 手工验收见 `check.md`。
 >
 > 前置章节：01-LLM 终端对话。所有命令使用 pnpm；开发运行 `pnpm dev`，聚焦测试使用 `pnpm test -- <path>`，类型检查 `pnpm typecheck`，构建 `pnpm build`。
 >
@@ -28,10 +28,10 @@
 | 修改 | `src/providers/types.ts` | `ChatRequest` 增加 `tools?: ToolDefinition[]`；`StreamEvent` 增加工具调用事件 |
 | 修改 | `src/providers/anthropic.ts` | 注入 `params.tools`、流式解析 `tool_use` / `thinking`、`buildAnthropicMessages` 支持 `tool_use` / `tool_result` |
 | 修改 | `src/providers/openai.ts` | OpenAI Chat Completions 工具调用解析与历史回灌 |
-| 修改 | `src/conversation/conversation.ts` | `Message` 增 `toolUses?` / `toolResults?` / `thinkingBlocks?`；`addAssistantFull` / `addToolResultsMessage` |
+| 修改 | `src/conversation/conversation.ts` | `ConversationBlock` 保存 thinking / tool use / tool result；`addAssistantMessage` / `addToolResultsMessage` |
 | 修改 | `src/prompt/sections.ts` | `usingToolsSection` / `executingActionsSection` |
 | 新建 | `src/tui/tool-display.tsx` | `ToolDisplay` / `ToolBlock` / `formatArgs` |
-| 修改 | `src/tui/chat.tsx` | `ChatMessage` 联合加 `tool_use` / `tool_result`；`MessageBlock` 分派 |
+| 修改 | `src/tui/chat-view.tsx` | 从 `ConversationMessage` block 渲染工具调用、结果与 Markdown 正文 |
 | 修改 | `src/tui/app.tsx` | 装配 `ToolRegistry` + `Agent`；`for await (ev of agent.run())` 映射 `ChatMessage` |
 | 新建 | `tests/tools/*.test.ts` | 注册中心 + 6 个工具单测 |
 
@@ -325,13 +325,11 @@
        this.conversation.addToolResultsMessage(toolResultBlocks);
        yield { type: "turn_complete" };
 
-       // 本章单轮收口：拿到工具结果后直接结束，不再回到 stream
-       yield { type: "loop_complete", stopReason: "tool_use" };
-       return;
+        // 回灌后再请求一次模型，只生成最终文本；第二批工具调用会被拒绝。
      }
      ```
 2. `tests/agent/agent.test.ts`：实现一个 `FakeProvider implements Provider`：可配置两次 `stream` 调用各自吐什么事件。
-   - 脚本 (a)：第一次吐 `tool_call_complete(ReadFile, { file_path: <tmp> })` + `stream_end` → 第二次吐 `text_delta("ok")` + `stream_end` → 由于单轮收口，本章 agent 第二次 stream 应不被调用。修正断言：第一次 stream 产生 `tool_use` + `tool_result` 后直接 `loop_complete`。
+    - 脚本 (a)：第一次吐 `tool_call_complete(ReadFile, { file_path: <tmp> })` + `done`，第二次吐 `text_delta("ok")` + `done`；断言工具结果进入第二次请求历史，并输出最终文本。
    - 脚本 (b)：第一次吐 `text_delta("hi") + stream_end`（无工具）→ 断言只跑一遍 stream、`loop_complete` 出现且 `conv.getMessages()` 最后是 `role: "assistant", content: "hi"`。
 
 **验证：** `pnpm test -- tests/agent/agent.test.ts` 通过。

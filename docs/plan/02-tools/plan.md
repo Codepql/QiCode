@@ -1,6 +1,6 @@
 # QiCode 第02阶段技术计划：工具系统
 
-> 状态：规划中，等待用户明确说“开发第 02 章”后执行。
+> 状态：已实现，2026-07-28 按当前代码校准。手工终端验收项见 `check.md`。
 >
 > 前置章节：01-LLM 终端对话。本章沿用第 01 章的 Node.js 22 LTS、pnpm 10.14.0、TypeScript、Vitest、统一 `Provider` 和两种 protocol 基线。
 >
@@ -12,11 +12,11 @@
 
 - 运行时：Node.js 22 LTS（直接执行 `.ts` / `.tsx`，无需构建）。
 - 语言：TypeScript 5.x，`pnpm typecheck` 严格类型检查。
-- TUI：Ink 5（React 18 渲染到终端）、`ink-spinner`、`ink-text-input`。
+- TUI：Ink 7（React 19 渲染到终端）。
 - LLM 协议层：沿用第 01 章基于 Node 原生 `fetch`、Web Streams 与统一 `Provider` 的实现。
 - 文件 / 进程：Node 内置 `node:fs`、`node:fs/promises`、`node:path`、`node:child_process`（`spawn`）。
 - Glob：`fast-glob` 内置（`scanSync` 同步迭代）。
-- Markdown 渲染：`marked` + `marked-terminal`。
+- Markdown 渲染：`marked`（由 Ink 组件渲染 token）。
 - 测试：`pnpm test`。
 - 类型检查：`pnpm typecheck`。
 
@@ -29,9 +29,9 @@
 - **`src/tools/`（新建）**：统一 `Tool` 接口、`ToolResult`、`ToolContext`、`ToolRegistry`、6 个工具实现、`descriptions.ts` 模型可见的工具说明。零外部依赖，不感知 LLM 协议。
 - **`src/agent/`（新建）**：`Agent.run()` 是 `AsyncGenerator<AgentEvent>`，承载单轮闭环；`StreamingExecutor` 把已完成的工具调用通过 `Promise.all` 并发跑出来；`events.ts` 定义协议无关的 `AgentEvent` 联合类型。
 - **`src/providers/`（扩展）**：`StreamEvent` 增加工具调用事件；`ChatRequest` 增加可选 `tools`，保持 `Provider.stream(request)` 单参数契约；Anthropic 与 OpenAI Provider 分别注入工具定义、解析工具调用并映射历史中的工具结果。
-- **`src/conversation/`（扩展）**：`Message` 增加 `toolUses?: ToolUseBlock[]` 与 `toolResults?: ToolResultBlock[]`；新增 `addAssistantFull(text, toolUses, thinking?)` 与 `addToolResultsMessage(results)`。
+- **`src/conversation/`（扩展）**：统一 `ConversationBlock` 保存文本、thinking、tool use 和 tool result；新增 `addAssistantMessage(content)` 与 `addToolResultsMessage(results)`。
 - **`src/prompt/`（扩展）**：`sections.ts` 增加 `usingToolsSection` / `executingActionsSection` 等说明 Agent 角色与工具使用规约。
-- **`src/tui/`（扩展）**：`tool-display.tsx` 渲染 Claude Code 风格工具行；`chat.tsx` 在 `MessageBlock` 里识别 `tool_use` / `tool_result` 类型；`app.tsx` 在 `for await` 循环里把 `AgentEvent` 翻译成 `ChatMessage` 加进 scrollback。
+- **`src/tui/`（扩展）**：`tool-display.tsx` 渲染工具行；`chat-view.tsx` 从对话 block 找到工具调用和结果；`app.tsx` 消费 `AgentEvent` 并更新动态状态。
 
 依赖方向（无环）：`tools → llm`（仅 `getAllSchemas` 返回 `Record<string, unknown>[]`，不导入 `llm` 类型）；`conversation → llm`（共享 `ThinkingBlock` / `ToolUseBlock` / `ToolResultBlock` 接口定义）；`agent → { llm, tools, conversation }`；`tui → { agent, tools, conversation, llm, prompt }`。
 
@@ -329,7 +329,7 @@ export class StreamingExecutor {
    - 每个 result → `yield { type: "tool_result", ... }`，并收集到 `ToolResultBlock[]`。
    - `conv.addToolResultsMessage(toolResultBlocks)`。
    - `yield { type: "turn_complete" }`。
-6. 本章版**只跑一次循环**：拿到工具结果后不再回到步骤 2，直接 `yield { type: "loop_complete", stopReason: "tool_use" }`；连环 Loop 留待下一章打开（删除「只跑一次」的早返回即可）。
+6. 工具结果回灌后发起第二次 stream，只用于生成最终文本；若第二次仍请求工具，发出单轮上限错误且不执行。多轮 Agent Loop 留待第 03 章。
 
 ### `src/providers/anthropic.ts`
 
@@ -427,6 +427,54 @@ agent.run():
   ├── conv.addToolResultsMessage(toolResultBlocks)
   ├── yield turn_complete
   └── 本章版直接 yield loop_complete（不再回到 stream）
+
+
+
+  用户
+ │
+ ▼
+submit()
+ │
+ ├── conv.addUserMessage()
+ │
+ ├── new Agent()
+ │
+ └── for await(agent.run())
+          │
+          ▼
+     client.stream()
+          │
+          ├── stream_text ─────────────► UI 实时显示打字
+          │
+          ├── tool_use ───────────────► UI 显示“工具运行中”
+          │
+          ▼
+     保存 Assistant 消息
+          │
+          ▼
+     是否有 Tool？
+       │
+   ┌───┴──────────┐
+   │              │
+ 无 Tool        有 Tool
+   │              │
+   ▼              ▼
+loop_complete  StreamingExecutor
+                   │
+                   ▼
+             Promise.all 并发执行
+                   │
+                   ▼
+             tool_result ───────────► UI 更新工具结果
+                   │
+                   ▼
+          保存 Tool Result 到 Conversation
+                   │
+                   ▼
+             turn_complete
+                   │
+                   ▼
+             loop_complete
 ```
 
 ## 文件组织

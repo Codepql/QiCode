@@ -3,6 +3,8 @@ import { Conversation } from "../../src/conversation/conversation.js";
 import type {
   ConversationMessage,
   ThinkingBlock,
+  ToolResultBlock,
+  ToolUseBlock,
 } from "../../src/conversation/types.js";
 
 describe("Conversation", () => {
@@ -36,6 +38,71 @@ describe("Conversation", () => {
       role: "assistant",
       content: [thinking, { type: "text", text: "Visible answer" }],
     });
+  });
+
+  it("stores assistant text, thinking, and tool calls in order", () => {
+    const conversation = new Conversation();
+    const thinking: ThinkingBlock = {
+      type: "thinking",
+      thinking: "private reasoning",
+      signature: "signed-block",
+      hidden: true,
+    };
+    const toolUse: ToolUseBlock = {
+      type: "tool_use",
+      id: "tool-1",
+      name: "ReadFile",
+      input: { file_path: "README.md" },
+    };
+
+    conversation.addAssistantMessage([
+      thinking,
+      { type: "text", text: "我先读取文件。" },
+      toolUse,
+    ]);
+
+    expect(conversation.getMessages()[0]).toEqual({
+      role: "assistant",
+      content: [thinking, { type: "text", text: "我先读取文件。" }, toolUse],
+    });
+  });
+
+  it("adds tool results as a user message", () => {
+    const conversation = new Conversation();
+    const results: ToolResultBlock[] = [
+      {
+        type: "tool_result",
+        toolUseId: "tool-1",
+        content: "1\t# QiCode",
+        isError: false,
+      },
+    ];
+
+    conversation.addToolResultsMessage(results);
+
+    expect(conversation.getMessages()).toEqual([
+      { role: "user", content: results },
+    ]);
+  });
+
+  it("does not expose mutable tool inputs or results", () => {
+    const conversation = new Conversation();
+    const toolUse: ToolUseBlock = {
+      type: "tool_use",
+      id: "tool-1",
+      name: "ReadFile",
+      input: { nested: { path: "original" } },
+    };
+    conversation.addAssistantMessage([toolUse]);
+
+    const firstRead = conversation.getMessages();
+    const firstBlock = firstRead[0]?.content[0];
+    if (firstBlock?.type === "tool_use") {
+      const nested = firstBlock.input["nested"] as { path: string };
+      nested.path = "mutated";
+    }
+
+    expect(conversation.getMessages()[0]?.content[0]).toEqual(toolUse);
   });
 
   it("returns deep copies so callers cannot mutate internal history", () => {
@@ -86,6 +153,18 @@ describe("Conversation", () => {
           thinking: "private reasoning",
           signature: "signed-block",
           hidden: true,
+        },
+        {
+          type: "tool_use",
+          id: "tool-1",
+          name: "ReadFile",
+          input: { file_path: "README.md" },
+        },
+        {
+          type: "tool_result",
+          toolUseId: "tool-1",
+          content: "hidden tool output",
+          isError: false,
         },
         { type: "text", text: "First paragraph" },
         { type: "text", text: "Second paragraph" },

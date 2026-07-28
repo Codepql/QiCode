@@ -5,29 +5,64 @@ import type { ReactElement, ReactNode } from "react";
 import type { ConversationMessage } from "../conversation/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import { sanitizeTerminalText } from "./sanitize-terminal.js";
+import { ToolDisplay } from "./tool-display.js";
 
 export interface ChatViewProps {
   messages: readonly ConversationMessage[];
   streamingText?: string;
+  activeTools?: readonly ActiveTool[];
 }
 
-export function ChatView({ messages, streamingText = "" }: ChatViewProps) {
+export interface ActiveTool {
+  toolId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+}
+
+export function ChatView({ messages, streamingText = "", activeTools = [] }: ChatViewProps) {
+  const toolResults = new Map(
+    messages.flatMap((message) => message.content)
+      .filter((block) => block.type === "tool_result")
+      .map((block) => [block.toolUseId, block]),
+  );
+
   return (
     <Box flexDirection="column">
       {messages.map((message, index) => {
         const visible = sanitizeTerminalText(Conversation.visibleText(message));
-        if (!visible) return null;
+        const toolUses = message.content.filter((block) => block.type === "tool_use");
+        if (!visible && toolUses.length === 0) return null;
         return (
           <Box key={`${message.role}-${index}`} flexDirection="column" marginBottom={1}>
-            <Text bold color={message.role === "user" ? "cyan" : "green"}>
-              {message.role === "user" ? "You" : "QiCode"}
-            </Text>
-            {message.role === "assistant"
-              ? <MarkdownText value={visible} />
-              : <Text>{visible}</Text>}
+            {visible && <>
+              <Text bold color={message.role === "user" ? "cyan" : "green"}>
+                {message.role === "user" ? "You" : "QiCode"}
+              </Text>
+              {message.role === "assistant"
+                ? <MarkdownText value={visible} />
+                : <Text>{visible}</Text>}
+            </>}
+            {toolUses.length > 0 && <ToolDisplay tools={toolUses.map((toolUse) => {
+              const result = toolResults.get(toolUse.id);
+              return result === undefined
+                ? { toolName: toolUse.name, args: toolUse.input, loading: true }
+                : {
+                    toolName: toolUse.name,
+                    args: toolUse.input,
+                    output: result.content,
+                    isError: result.isError,
+                  };
+            })} />}
           </Box>
         );
       })}
+      {activeTools.length > 0 && (
+        <ToolDisplay tools={activeTools.map((tool) => ({
+          toolName: tool.toolName,
+          args: tool.args,
+          loading: true,
+        }))} />
+      )}
       {streamingText && (
         <Box flexDirection="column">
           <Text bold color="green">QiCode</Text>
@@ -182,7 +217,7 @@ function renderInline(tokens: readonly Token[], keyPrefix: string): ReactNode[] 
       }
       case "codespan": {
         const code = token as Tokens.Codespan;
-        return <Text key={key} color="yellow">{code.text}</Text>;
+        return <Text key={key} color="blue">{code.text}</Text>;
       }
       case "link": {
         const link = token as Tokens.Link;

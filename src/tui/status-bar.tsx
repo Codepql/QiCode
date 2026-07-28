@@ -1,15 +1,15 @@
 import { Text } from "ink";
 
 export interface StatusBarProps {
-  model: string;
+  mode: string;
   inputTokens?: number;
   outputTokens?: number;
 }
 
-export function StatusBar({ model, inputTokens, outputTokens }: StatusBarProps) {
+export function StatusBar({ mode, inputTokens, outputTokens }: StatusBarProps) {
   return (
     <Text dimColor wrap="truncate-end">
-      {model} · ↑ {inputTokens ?? "-"} · ↓ {outputTokens ?? "-"} · Ctrl+C exit
+      {mode} · ↑ {inputTokens ?? "-"} · ↓ {outputTokens ?? "-"} · Ctrl+C exit
     </Text>
   );
 }

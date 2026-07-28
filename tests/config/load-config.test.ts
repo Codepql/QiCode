@@ -28,9 +28,9 @@ async function writeConfig(contents: string): Promise<string> {
 }
 
 describe("resolveConfigPath", () => {
-  it("uses ~/.qicode/config.yaml when no argument is provided", () => {
+  it("uses ~/.QiCode/config.yaml when no argument is provided", () => {
     expect(resolveConfigPath([], "C:\\Users\\tester")).toBe(
-      join("C:\\Users\\tester", ".qicode", "config.yaml"),
+      join("C:\\Users\\tester", ".QiCode", "config.yaml"),
     );
   });
 
