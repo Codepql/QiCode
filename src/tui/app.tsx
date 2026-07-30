@@ -48,12 +48,14 @@ export function App({
   const [exitHint, setExitHint] = useState("");
   const [inputTokens, setInputTokens] = useState<number>();
   const [outputTokens, setOutputTokens] = useState<number>();
+  const [iteration, setIteration] = useState<number>();
   const [startedAt, setStartedAt] = useState(Date.now());
   const conversationRef = useRef(new Conversation());
   const providerRef = useRef<Provider | undefined>(undefined);
   const abortRef = useRef<AbortController | undefined>(undefined);
   const lastCtrlCRef = useRef(0);
   const exitHintTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const busy = status === "waiting" || status === "streaming";
 
   useEffect(() => () => {
     abortRef.current?.abort();
@@ -65,7 +67,19 @@ export function App({
   }, [selectedConfig]);
 
   useInput((input, key) => {
+    if (key.escape && busy) {
+      abortRef.current?.abort();
+      setExitHint("Cancelling current task...");
+      return;
+    }
+
     if (key.ctrl && input === "c") {
+      if (busy) {
+        abortRef.current?.abort();
+        setExitHint("Cancelling current task...");
+        return;
+      }
+
       const now = Date.now();
       if (now - lastCtrlCRef.current <= 2_000) {
         exit();
@@ -73,7 +87,6 @@ export function App({
       }
 
       lastCtrlCRef.current = now;
-      abortRef.current?.abort();
       setExitHint("Press Ctrl+C again within 2s to exit.");
       if (exitHintTimerRef.current) clearTimeout(exitHintTimerRef.current);
       exitHintTimerRef.current = setTimeout(() => {
@@ -92,8 +105,6 @@ export function App({
     );
   }
 
-  const busy = status === "waiting" || status === "streaming";
-
   async function submit(rawText: string): Promise<void> {
     const provider = providerRef.current;
     const config = selectedConfig;
@@ -110,6 +121,7 @@ export function App({
     setErrorMessage("");
     setInputTokens(undefined);
     setOutputTokens(undefined);
+    setIteration(undefined);
     setStatus("waiting");
     setStartedAt(Date.now());
 
@@ -133,7 +145,10 @@ export function App({
       });
 
       for await (const event of agent.run()) {
-        if (event.type === "stream_text") {
+        if (event.type === "iteration_start") {
+          setIteration(event.iteration);
+          setStatus("streaming");
+        } else if (event.type === "stream_text") {
           setStreamingText((current) => current + event.text);
           setStatus("streaming");
         } else if (event.type === "thinking_text") {
@@ -152,8 +167,12 @@ export function App({
           setMessages(conversationRef.current.getMessages());
           setStreamingText("");
         } else if (event.type === "usage") {
-          if (event.inputTokens !== undefined) setInputTokens(event.inputTokens);
-          if (event.outputTokens !== undefined) setOutputTokens(event.outputTokens);
+          if (event.inputTokens !== undefined) {
+            setInputTokens((current) => (current ?? 0) + event.inputTokens!);
+          }
+          if (event.outputTokens !== undefined) {
+            setOutputTokens((current) => (current ?? 0) + event.outputTokens!);
+          }
         } else if (event.type === "error") {
           agentFailed = true;
           setErrorMessage(event.message);
@@ -161,7 +180,7 @@ export function App({
         }
       }
       setMessages(conversationRef.current.getMessages());
-      if (!controller.signal.aborted) setStatus(agentFailed ? "failed" : "idle");
+      setStatus(controller.signal.aborted || !agentFailed ? "idle" : "failed");
     } catch (error) {
       setErrorMessage(
         timedOut
@@ -174,6 +193,8 @@ export function App({
       abortRef.current = undefined;
       setStreamingText("");
       setActiveTools([]);
+      setIteration(undefined);
+      setExitHint("");
     }
   }
 
@@ -181,7 +202,11 @@ export function App({
     <Box flexDirection="column">
       <Header version={VERSION} model={selectedConfig.model} workDir={workDir} />
       <ChatView messages={messages} streamingText={streamingText} activeTools={activeTools} />
-      <Activity active={busy} label={status === "waiting" ? "Waiting" : "Thinking"} startedAt={startedAt} />
+      <Activity
+        active={busy}
+        label={status === "waiting" ? "Waiting" : iteration === undefined ? "Thinking" : `Iteration ${iteration}`}
+        startedAt={startedAt}
+      />
       {errorMessage && <Text color="red">Error: {errorMessage}</Text>}
       {exitHint && <Text color="yellow">{exitHint}</Text>}
       <Box marginTop={1} flexDirection="column">

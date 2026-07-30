@@ -3,6 +3,7 @@ import { render } from "ink-testing-library";
 import { describe, expect, it } from "vitest";
 import type { ConversationMessage } from "../../src/conversation/types.js";
 import { ChatView } from "../../src/tui/chat-view.js";
+import { Activity } from "../../src/tui/activity.js";
 import { Header } from "../../src/tui/header.js";
 import { InputBox } from "../../src/tui/input-box.js";
 import { sanitizeTerminalText } from "../../src/tui/sanitize-terminal.js";
@@ -59,6 +60,11 @@ describe("TUI layout", () => {
   it("shows unknown usage as dashes", () => {
     const view = render(<StatusBar mode="default" />);
     expect(view.lastFrame()).toContain("default · ↑ - · ↓ -");
+  });
+
+  it("shows the active agent iteration in the activity label", () => {
+    const view = render(<Activity active label="Iteration 2" startedAt={Date.now()} />);
+    expect(view.lastFrame()).toContain("Iteration 2");
   });
 
   it("removes terminal control sequences while preserving newlines and tabs", () => {

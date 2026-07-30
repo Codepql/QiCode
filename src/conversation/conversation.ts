@@ -40,6 +40,20 @@ export class Conversation {
     });
   }
 
+  addSystemReminder(content: string): void {
+    if (content.trim() === "") {
+      throw new Error("System reminder must not be empty");
+    }
+
+    this.#messages.push({
+      role: "user",
+      content: [{
+        type: "text",
+        text: `<system-reminder>\n${content}\n</system-reminder>`,
+      }],
+    });
+  }
+
   getMessages(): ConversationMessage[] {
     return this.#messages.map(cloneMessage);
   }

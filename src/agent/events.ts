@@ -1,4 +1,5 @@
 export type AgentEvent =
+  | { type: "iteration_start"; iteration: number }
   | { type: "stream_text"; text: string }
   | { type: "thinking_text"; thinking: string }
   | { type: "thinking_complete"; thinking: string; signature: string }

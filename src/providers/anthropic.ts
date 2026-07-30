@@ -48,6 +48,7 @@ export class AnthropicProvider implements Provider {
     const thinkingBlocks = new Map<number, { thinking: string; signature: string }>();
     const toolCalls = new Map<number, { id: string; name: string; argumentsJson: string }>();
     let stopReason: string | undefined;
+    let doneEmitted = false;
     try {
       for await (const message of parseSSE(
         requireResponseBody(response),
@@ -137,6 +138,7 @@ export class AnthropicProvider implements Provider {
           yield stopReason === undefined
             ? { type: "done" }
             : { type: "done", stopReason };
+          doneEmitted = true;
         } else if (type === "error") {
           throw new ProviderResponseError("Anthropic stream returned an error event");
         }
@@ -144,6 +146,8 @@ export class AnthropicProvider implements Provider {
     } catch (error) {
       normalizeFetchError(error, request.signal);
     }
+
+    if (!doneEmitted) yield { type: "done" };
   }
 
   private buildRequestBody(request: ChatRequest): Record<string, unknown> {
