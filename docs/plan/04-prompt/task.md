@@ -1,6 +1,6 @@
 # QiCode 第04阶段任务清单：系统提示工程化
 
-> 状态：未开始。只有用户明确说“开发第 04 章”后才执行。
+> 状态：开发中。T1 已完成，等待下一阶段 T2。
 >
 > 前置章节：01-LLM、02-Tools、03-Agent Loop。所有命令使用 pnpm；开发运行 `pnpm dev`，聚焦测试使用 `pnpm test -- <path>`，类型检查 `pnpm typecheck`，构建 `pnpm build`。
 >
@@ -30,7 +30,9 @@
 
 ---
 
-## T1: Section 工厂与 Environment 渲染**文件:** `src/prompt/sections.ts`
+## T1: Section 工厂与 Environment 渲染（已完成）
+
+**文件:** `src/prompt/sections.ts`、`src/prompt/system-prompt.ts`、`tests/prompt/sections.test.ts`
 **依赖:** 无
 **步骤:**
 1. 定义 `export interface Section { name: string; priority: number; content: string }`。
@@ -45,7 +47,9 @@
 3. 定义 `export interface EnvironmentContext { workDir; os; arch; shell; isGitRepo; gitBranch; model; date }`。
 4. 实现 `environmentSection(env)` priority=70:输出 `# 环境` 段,固定行 workDir / `${os}/${arch}` / shell / isGitRepo / date;条件行 gitBranch(`env.isGitRepo && env.gitBranch`)、model(非空)。
 
-**验证:** `pnpm test -- tests/prompt-builder.test.ts` 中断言各 Section name/priority 正确。
+**实际实现:** 已定义 `Section`、`EnvironmentContext`、八个固定 Section 工厂；旧版 `buildSystemPrompt()` 改为读取 Section 的 `content`，保证进入 T2 前现有调用链仍可用。
+
+**验证:** 已新增聚焦用例覆盖 Section 名称、优先级和环境可选行；按用户要求本阶段不运行自动化测试，仅执行类型检查。
 
 ## T2: PromptBuilder 与 buildSystemPrompt**文件:** `src/prompt/builder.ts`
 **依赖:** T1
