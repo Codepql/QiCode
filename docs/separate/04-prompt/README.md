@@ -60,7 +60,7 @@ usingToolsSection() -> { name: "UsingTools", priority: 40, content: "..." }
 
 当前只是具备统一零件，尚未由统一 Builder 自动组装。
 
-## 第 2 次：PromptBuilder 与环境探测
+## 第 2 次：PromptBuilder 与环境探测（已完成）
 
 对应原任务：T2、T10 中的 Builder 测试。
 
@@ -79,6 +79,8 @@ Section 解决“提示词由哪些模块组成”，Builder 解决“这些模�
 ### 阶段结果
 
 新增一个提示模块时，只需要创建 Section 并挂载，不需要修改排序和拼接算法。
+
+> 当前实现状态：已完成。`src/prompt/builder.ts` 负责组装与环境探测；本阶段尚未接入 TUI 和 Agent，接线留在第 3 次开发。
 
 ## 第 3 次：稳定提示词接入现有运行链
 

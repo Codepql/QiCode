@@ -1,10 +1,16 @@
 import type { ProviderConfig } from "../config/types.js";
 import type { ConversationMessage } from "../conversation/types.js";
-import { ProviderResponseError } from "./errors.js";
-import { assertSuccessfulResponse, normalizeFetchError, requireResponseBody } from "./http.js";
-import { parseSSE } from "./sse.js";
-import type { ChatRequest, Provider, StreamEvent } from "./types.js";
-import { buildProviderUrl } from "./url.js";
+import {
+  assertSuccessfulResponse,
+  buildProviderUrl,
+  normalizeFetchError,
+  parseSSE,
+  ProviderResponseError,
+  requireResponseBody,
+  type ChatRequest,
+  type Provider,
+} from "./client.js";
+import type { StreamEvent } from "./events.js";
 
 type FetchLike = typeof fetch;
 

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { AbortProviderError, ProviderResponseError } from "../../src/providers/errors.js";
-import { parseSSE } from "../../src/providers/sse.js";
+import {
+  AbortProviderError,
+  parseSSE,
+  ProviderResponseError,
+} from "../../src/llm/client.js";
 
 const encoder = new TextEncoder();
 

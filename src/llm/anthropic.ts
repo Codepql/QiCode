@@ -1,14 +1,16 @@
 import type { ProviderConfig } from "../config/types.js";
 import type { ConversationMessage } from "../conversation/types.js";
-import { ProviderResponseError } from "./errors.js";
 import {
   assertSuccessfulResponse,
+  buildProviderUrl,
   normalizeFetchError,
+  parseSSE,
+  ProviderResponseError,
   requireResponseBody,
-} from "./http.js";
-import { parseSSE } from "./sse.js";
-import type { ChatRequest, Provider, StreamEvent } from "./types.js";
-import { buildProviderUrl } from "./url.js";
+  type ChatRequest,
+  type Provider,
+} from "./client.js";
+import type { StreamEvent } from "./events.js";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOKENS = 8192;

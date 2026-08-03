@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AnthropicProvider } from "../../src/providers/anthropic.js";
+import { AnthropicProvider } from "../../src/llm/anthropic.js";
 
 const encoder = new TextEncoder();
 const config = {

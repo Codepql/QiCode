@@ -95,14 +95,10 @@ ChatView / Activity / StatusBar / InputBox 重新渲染
 
 | 文件 | 负责什么 | 谁调用它 | 它调用谁 | 为什么需要它 |
 |---|---|---|---|---|
-| `src/providers/types.ts` | 定义 `Provider`、`ChatRequest`、`StreamEvent` | App 和所有 Provider | 会话类型 | 建立协议无关边界，是可扩展性的核心 |
-| `src/providers/create-provider.ts` | 按 protocol 创建实现 | `App` | Anthropic/OpenAI Provider | 上层不写协议判断，不直接 new 具体类 |
-| `src/providers/anthropic.ts` | 组装 Anthropic 请求并映射流事件 | Provider 工厂 | fetch、HTTP、URL、SSE | 隔离 Anthropic 格式和 extended thinking |
-| `src/providers/openai.ts` | 组装 OpenAI 兼容请求并映射流事件 | Provider 工厂 | fetch、HTTP、URL、SSE | 隔离 Chat Completions 格式和兼容端点差异 |
-| `src/providers/sse.ts` | 将任意 chunk 边界的字节流解析为 SSE 事件 | 两个 Provider | Web Stream、TextDecoder | 网络 chunk 不等于 SSE 事件，必须独立处理拆包和粘包 |
-| `src/providers/url.ts` | 安全拼接 base URL 和资源路径 | 两个 Provider | `URL` | 避免重复 `/v1` 或丢失 base URL 已有路径 |
-| `src/providers/http.ts` | 检查 HTTP 响应、分类网络和取消错误 | 两个 Provider | Provider 错误类型 | 两套协议共享一致的失败语义 |
-| `src/providers/errors.ts` | 定义统一错误并生成安全用户提示 | HTTP 层、Provider、App | 无 | TUI 不应该理解每家供应商的错误体 |
+| `src/llm/events.ts` | 定义 `StreamEvent`、`UsageInfo` 和工具契约 | Agent 和所有 Provider | 无 | 建立协议无关的事件语言 |
+| `src/llm/client.ts` | 定义 Provider 请求契约、创建协议实现并提供共享网络能力 | `App`、两种 Provider | Anthropic/OpenAI Provider、Web Stream、URL | 上层不写协议判断，共享错误、HTTP、URL 与 SSE 语义 |
+| `src/llm/anthropic.ts` | 组装 Anthropic 请求并映射流事件 | Provider 工厂 | fetch、HTTP、URL、SSE | 隔离 Anthropic 格式和 extended thinking |
+| `src/llm/openai.ts` | 组装 OpenAI 兼容请求并映射流事件 | Provider 工厂 | fetch、HTTP、URL、SSE | 隔离 Chat Completions 格式和兼容端点差异 |
 
 ### 3.4 TUI 层
 
@@ -142,7 +138,7 @@ for await (const event of provider.stream(request)) {
 }
 ```
 
-协议差异被限制在 `src/providers/anthropic.ts` 和 `src/providers/openai.ts`。以后增加新协议时，理想情况是增加 Provider 实现并扩展工厂，而不是重写 TUI 对话流程。
+协议差异被限制在 `src/llm/anthropic.ts` 和 `src/llm/openai.ts`。以后增加新协议时，理想情况是增加 Provider 实现并扩展工厂，而不是重写 TUI 对话流程。
 
 ### 4.3 为什么 SSE 要分成两层
 
@@ -194,15 +190,15 @@ Anthropic thinking 有两个不同要求：
 
 不要按文件夹字母顺序读。按一条请求的因果顺序读：
 
-1. `src/providers/types.ts`：先认识系统边界和事件语言。
+1. `src/llm/events.ts`：先认识系统边界和事件语言。
 2. `src/conversation/types.ts`：理解模型历史的数据形状。
 3. `src/tui/app.tsx`：只看 `submit()` 和 `commitAssistant()`。
-4. `src/providers/create-provider.ts`：看上层怎样得到具体实现。
-5. `src/providers/openai.ts`：先学较简单的文本流映射。
-6. `src/providers/sse.ts`：理解 chunk、frame 和 event 的区别。
-7. `src/providers/anthropic.ts`：最后增加 thinking 和 signature。
+4. `src/llm/client.ts`：看上层怎样得到具体实现。
+5. `src/llm/openai.ts`：先学较简单的文本流映射。
+6. `src/llm/client.ts`：理解 chunk、frame 和 event 的区别。
+7. `src/llm/anthropic.ts`：最后增加 thinking 和 signature。
 8. `src/conversation/conversation.ts`：验证历史如何保存和复制。
-9. `src/providers/http.ts`、`errors.ts`：理解失败路径。
+9. `src/llm/client.ts`：理解失败路径。
 10. 其余 TUI 与配置文件：补齐启动和展示细节。
 
 第一次阅读只回答四问；第二次才跟进函数内部；第三次通过断点验证自己的理解。
@@ -225,19 +221,19 @@ Anthropic thinking 有两个不同要求：
 
 ### D3. Provider 抽象发生作用
 
-- 断点：`src/providers/create-provider.ts` 的 `createProvider()`。
+- 断点：`src/llm/client.ts` 的 `createProvider()`。
 - 观察：`config.protocol`、返回实例类型。
 - 要证明：App 不直接依赖具体 Provider 类。
 
 ### D4. 请求体和完整历史
 
-- 断点：`src/providers/openai.ts` 或 `src/providers/anthropic.ts` 调用 `fetchImpl` 前。
+- 断点：`src/llm/openai.ts` 或 `src/llm/anthropic.ts` 调用 `fetchImpl` 前。
 - 观察：URL、headers、序列化后的 messages；不要在截图或笔记中保存真实 API Key。
 - 要证明：第二轮请求确实重新携带第一轮历史。
 
 ### D5. 字节流变成 SSE 事件
 
-- 断点：`src/providers/sse.ts` 的 `buffer += ...`、`findEventBoundary()` 和 `yield message` 附近。
+- 断点：`src/llm/client.ts` 的 `buffer += ...`、`findEventBoundary()` 和 `yield message` 附近。
 - 观察：`result.value`、`buffer`、`boundary`、`frame`、`message.data`。
 - 要证明：chunk 边界与事件边界不是一回事。
 

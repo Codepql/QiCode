@@ -8,7 +8,7 @@ import {
   RateLimitError,
   formatProviderError,
   redactSecrets,
-} from "../../src/providers/errors.js";
+} from "../../src/llm/client.js";
 
 describe("formatProviderError", () => {
   it.each([

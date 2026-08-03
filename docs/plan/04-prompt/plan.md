@@ -23,7 +23,7 @@
 第 04 章 在三层叠加,**不改 第 03 章 的 Agent Loop 控制流**:
 
 - **prompt 层(`src/prompt/`)**:`sections.ts` 定义八个固定 Section 工厂 + Section 类型;`builder.ts` 提供 `PromptBuilder` 类、`detectEnvironment(workDir)`、`buildSystemPrompt(env, opts)`;`plan-mode.ts` 提供 `buildPlanModeReminder / buildPlanModeExitReminder / buildPlanModeReentryReminder`。prompt 层只依赖 `node:child_process / node:os`,不依赖 llm 层。
-- **llm 层(`src/providers/`)**:`Provider` 接口签名 `stream(conv, tools, abortSignal)` 不变;`createProvider(cfg, systemPrompt)` 在构造时接收已装配好的系统提示;`AnthropicProvider` 把 systemPrompt 放进 `system: [{ type:"text", text, cache_control:{type:"ephemeral"} }]`、对最后一个 tool 与最后一条 user 末 block 也打 ephemeral 断点;`OpenAIProvider / OpenAIProvider` 把 systemPrompt 置于 input/messages 前缀。`UsageInfo` 扩展 `cacheReadInputTokens / cacheCreationInputTokens`,三 client 都填。
+- **llm 层(`src/llm/`)**:`Provider` 接口签名 `stream(conv, tools, abortSignal)` 不变;`createProvider(cfg, systemPrompt)` 在构造时接收已装配好的系统提示;`AnthropicProvider` 把 systemPrompt 放进 `system: [{ type:"text", text, cache_control:{type:"ephemeral"} }]`、对最后一个 tool 与最后一条 user 末 block 也打 ephemeral 断点;`OpenAIProvider / OpenAIProvider` 把 systemPrompt 置于 input/messages 前缀。`UsageInfo` 扩展 `cacheReadInputTokens / cacheCreationInputTokens`,三 client 都填。
 - **agent 层(`src/agent/agent.ts`)**:`run()` 每轮迭代开始时检查 `this.checker.mode === "plan"`,若是则 `getOrCreatePlanPath / planExists`、`addSystemReminder(buildPlanModeReminder(planPath, exists, iteration))`;同样位置注入 active-skills、hook、外部 notification 三类 reminder。reminder 通过 `ConversationManager.addSystemReminder` 写入 history,作为 role=user 消息 + `<system-reminder>...</system-reminder>` 标签。
 
 数据流:`TUI 初始化` → `detectEnvironment(workDir)` → `env.model = provider.model` → `buildSystemPrompt(env)` → `createProvider(provider, systemPrompt)` → `AnthropicProvider.systemPrompt / OpenAIProvider.systemPrompt` 固化 → `agent.run()` 每轮:`conversation.addSystemReminder(planReminder/...)` → `client.stream(apiConv, toolSchemas, signal)` → Anthropic/OpenAI 把 systemPrompt 放系统位、把 history 放消息位、解析 `usage.cache_*` → `UsageInfo{ inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens }` 透传给 agent 事件。
@@ -121,7 +121,7 @@ export function buildPlanModeReentryReminder(planPath: string, planFileExists: b
 ### 缓存用量字段
 
 ```ts
-// src/providers/types.ts
+// src/llm/events.ts
 export interface UsageInfo {
   inputTokens: number;
   outputTokens: number;
@@ -133,7 +133,7 @@ export interface UsageInfo {
 ### LLM Client 接口(签名不变)
 
 ```ts
-// src/providers/types.ts / src/providers/create-provider.ts
+// src/llm/client.ts / src/llm/events.ts
 export interface Provider {
   stream(
     conv: ConversationManager,
@@ -195,11 +195,11 @@ addSystemReminder(content: string): void {
 
 **依赖:** 无。
 
-### `src/providers/types.ts`(改造)
+### `src/llm/events.ts`(改造)
 **职责:** 定义 `StreamEvent` 与 `UsageInfo`。
 **关键点:** `UsageInfo` 增加 `cacheReadInputTokens / cacheCreationInputTokens` 两字段;`stream_end` 事件携带完整 usage。
 
-### `src/providers/anthropic.ts`(改造)
+### `src/llm/anthropic.ts`(改造)
 **职责:** Anthropic 协议 client,装配缓存断点,解析缓存用量。
 **关键点:**
 - 构造器签名 `constructor(cfg: ProviderConfig, systemPrompt: string)`,把 systemPrompt 存为字段。
@@ -209,7 +209,7 @@ addSystemReminder(content: string): void {
 - `message_start` 事件回填 `inputTokens / outputTokens / cacheReadInputTokens / cacheCreationInputTokens`(`?? 0` 兜底)。
 - `buildAnthropicMessages` 已存在的「连续 user 自动合并」逻辑保证 N3 角色合法。
 
-### `src/providers/openai.ts`(改造)
+### `src/llm/openai.ts`(改造)
 **职责:** OpenAI Responses + Chat Completions 两 client,装配 system 消息,解析 cached_tokens。
 **关键点:**
 - `OpenAIProvider.stream`(Responses):`input.push({ role:"system", content: this.systemPrompt })` 再追加历史消息;`response.completed` 事件读 `usage.input_tokens_details?.cached_tokens ?? 0`,`inputTokens = Math.max(0, (usage.input_tokens ?? 0) - cacheReadInputTokens)` 避免双计。

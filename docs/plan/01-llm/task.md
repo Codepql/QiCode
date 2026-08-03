@@ -134,8 +134,8 @@ pnpm typecheck
 
 - `src/conversation/types.ts`
 - `src/conversation/conversation.ts`
-- `src/providers/types.ts`
-- `src/providers/errors.ts`
+- `src/llm/events.ts`
+- `src/llm/client.ts`
 - `tests/conversation/conversation.test.ts`
 
 **先写测试**
@@ -178,10 +178,9 @@ pnpm typecheck
 
 **文件**
 
-- `src/providers/sse.ts`
-- `src/providers/url.ts`
-- `tests/providers/sse.test.ts`
-- `tests/providers/url.test.ts`
+- `src/llm/client.ts`
+- `tests/llm/sse.test.ts`
+- `tests/llm/url.test.ts`
 
 **先写测试**
 
@@ -212,7 +211,7 @@ pnpm typecheck
 **验证**
 
 ```text
-pnpm test -- tests/providers/sse.test.ts tests/providers/url.test.ts
+pnpm test -- tests/llm/sse.test.ts tests/llm/url.test.ts
 pnpm typecheck
 ```
 
@@ -236,8 +235,8 @@ pnpm typecheck
 
 **文件**
 
-- `src/providers/anthropic.ts`
-- `tests/providers/anthropic.test.ts`
+- `src/llm/anthropic.ts`
+- `tests/llm/anthropic.test.ts`
 
 **先写测试**
 
@@ -266,7 +265,7 @@ pnpm typecheck
 **验证**
 
 ```text
-pnpm test -- tests/providers/anthropic.test.ts
+pnpm test -- tests/llm/anthropic.test.ts
 pnpm typecheck
 ```
 
@@ -282,10 +281,10 @@ pnpm typecheck
 
 **文件**
 
-- `src/providers/openai.ts`
-- `src/providers/create-provider.ts`
-- `tests/providers/openai.test.ts`
-- `tests/providers/create-provider.test.ts`
+- `src/llm/openai.ts`
+- `src/llm/client.ts`
+- `tests/llm/openai.test.ts`
+- `tests/llm/client.test.ts`
 
 **先写测试**
 
@@ -313,7 +312,7 @@ pnpm typecheck
 **验证**
 
 ```text
-pnpm test -- tests/providers/openai.test.ts tests/providers/create-provider.test.ts
+pnpm test -- tests/llm/openai.test.ts tests/llm/client.test.ts
 pnpm typecheck
 ```
 

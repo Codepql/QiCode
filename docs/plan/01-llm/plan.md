@@ -88,12 +88,9 @@ QiCode/
 │  │  └─ conversation.ts          # 当前进程内的历史管理
 │  ├─ prompt/
 │  │  └─ system-prompt.ts         # 首期最小系统提示词
-│  ├─ providers/
-│  │  ├─ types.ts                 # Provider 与 StreamEvent 契约
-│  │  ├─ errors.ts                # 统一错误类型
-│  │  ├─ url.ts                   # 保留 base_url 路径的安全 URL 拼接
-│  │  ├─ sse.ts                   # 通用 SSE 解析器
-│  │  ├─ create-provider.ts       # protocol 工厂
+│  ├─ llm/
+│  │  ├─ events.ts                # StreamEvent、UsageInfo 与工具契约
+│  │  ├─ client.ts                # Provider、工厂、错误、HTTP、URL 与 SSE
 │  │  ├─ anthropic.ts             # Anthropic 请求与事件映射
 │  │  └─ openai.ts                # OpenAI 请求与事件映射
 │  └─ tui/
@@ -108,7 +105,7 @@ QiCode/
 ├─ tests/
 │  ├─ config/
 │  ├─ conversation/
-│  ├─ providers/
+│  ├─ llm/
 │  └─ tui/
 ├─ config.example.yaml
 ├─ package.json
@@ -127,7 +124,7 @@ main.tsx
   -> tui/App
        -> conversation
        -> prompt/system-prompt
-       -> providers/create-provider
+       -> llm/create-provider
             -> AnthropicProvider
             -> OpenAIProvider
                  -> shared SSE parser

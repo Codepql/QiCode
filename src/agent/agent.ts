@@ -5,7 +5,8 @@ import type {
   ToolResultBlock,
   ToolUseBlock,
 } from "../conversation/types.js";
-import type { Provider, StreamEvent, ToolDefinition } from "../providers/types.js";
+import type { Provider } from "../llm/client.js";
+import type { StreamEvent, ToolDefinition } from "../llm/events.js";
 import { buildPlanModeReminder } from "../prompt/plan-mode.js";
 import { PermissionChecker } from "../permissions/checker.js";
 import { ToolRegistry } from "../tools/registry.js";

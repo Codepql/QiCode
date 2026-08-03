@@ -6,14 +6,14 @@
 >
 > 每个行为任务遵循测试先行，并在完成后记录真实实现位置和验证证据。
 
-> 模块路径 `src/agent/*`、`src/providers/*`、`src/tools/*`、`src/conversation/*`、`src/prompt/*`、`src/permissions/*`、`src/tui/*`，运行时 Node.js 22 LTS + TypeScript 5.x。任务有序，每步留绿 `pnpm typecheck`。验证一律「先跑命令看输出，再下结论」。
+> 模块路径 `src/agent/*`、`src/llm/*`、`src/tools/*`、`src/conversation/*`、`src/prompt/*`、`src/permissions/*`、`src/tui/*`，运行时 Node.js 22 LTS + TypeScript 5.x。任务有序，每步留绿 `pnpm typecheck`。验证一律「先跑命令看输出，再下结论」。
 
 ## 当前代码校准（2026-07-30）
 
 第 02 章实现已经提前覆盖了原计划的部分公共基础，不能重复开发：
 
 - `src/agent/events.ts` 已存在；第 03 章第 1 次补充了 `iteration_start` 事件。
-- `src/providers/types.ts` 已有工具调用、`usage` 与 `done` 流事件；本章后续只在确有需要时调整，不按旧计划强改成 `stream_end`。
+- `src/llm/events.ts` 已有工具调用、`usage` 与 `done` 流事件；本章后续只在确有需要时调整，不按旧计划强改成 `stream_end`。
 - `ToolCategory`、六个工具的分类和 `ToolRegistry.getAllSchemas()` 已存在。
 - Conversation 已有 assistant block 与 tool result 历史；第 03 章第 1 次新增 `addSystemReminder()`。
 - 第 03 章第 2 次确认 Provider 已具备 SSE、`usage`、`done`、错误归一化和 `AbortSignal`；补充 Anthropic 在异常缺少 `message_stop` 时仍输出 `done` 的收尾兜底。
@@ -27,11 +27,11 @@
 | 新增 | `src/agent/events.ts` | `AgentEvent` discriminated union |
 | 新增 | `src/agent/streaming-executor.ts` | `StreamingExecutor` 工具批执行器 |
 | 新增 | `src/agent/agent.ts` | `Agent` 类与 `run()` AsyncGenerator |
-| 修改 | `src/providers/types.ts` | `StreamEvent` 增 `stream_end`、`UsageInfo` 类型 |
-| 修改 | `src/providers/types.ts` / `src/providers/create-provider.ts` | `Provider.stream(conv, tools, abortSignal)` 签名 |
-| 修改 | `src/providers/anthropic.ts` | `AsyncGenerator<StreamEvent>`，`stream_end` 携带 usage |
-| 修改 | `src/providers/openai.ts` | `stream_options.include_usage`，OpenAICompat 同步 |
-| 新增 | `src/providers/errors.ts` | `ContextTooLongError`、`RateLimitError` 等错误类 |
+| 修改 | `src/llm/events.ts` | `StreamEvent` 增 `stream_end`、`UsageInfo` 类型 |
+| 修改 | `src/llm/events.ts` / `src/llm/client.ts` | `Provider.stream(conv, tools, abortSignal)` 签名 |
+| 修改 | `src/llm/anthropic.ts` | `AsyncGenerator<StreamEvent>`，`stream_end` 携带 usage |
+| 修改 | `src/llm/openai.ts` | `stream_options.include_usage`，OpenAICompat 同步 |
+| 新增 | `src/llm/client.ts` | `ContextTooLongError`、`RateLimitError` 等错误类 |
 | 修改 | `src/tools/types.ts` | `Tool` 接口加 `category: ToolCategory` |
 | 修改 | `src/tools/registry.ts` | `getAllSchemas(protocol)` 协议适配 |
 | 修改 | `src/tools/{read-file,glob,grep,write-file,edit-file,bash}.ts` | 各打 `category` |
@@ -43,10 +43,10 @@
 
 ## T1: 定义 `AgentEvent` 与 `UsageInfo`（已完成基础校准）
 
-**文件：** `src/agent/events.ts`、`src/providers/types.ts`
+**文件：** `src/agent/events.ts`、`src/llm/events.ts`
 **依赖：** 无
 **步骤：**
-1. `src/providers/types.ts`：新增 `interface UsageInfo { inputTokens; outputTokens; cacheReadInputTokens; cacheCreationInputTokens }`；扩展 `StreamEvent` 联合类型加 `tool_call_start` / `tool_call_delta` / `tool_call_complete` / `stream_end { stopReason, usage }`。
+1. `src/llm/events.ts`：新增 `interface UsageInfo { inputTokens; outputTokens; cacheReadInputTokens; cacheCreationInputTokens }`；扩展 `StreamEvent` 联合类型加 `tool_call_start` / `tool_call_delta` / `tool_call_complete` / `stream_end { stopReason, usage }`。
 2. `src/agent/events.ts`：定义 `AgentEvent` discriminated union（spec 列出的全部 9 个 `type` 分支）。
 
 **实际结果：** `AgentEvent` 原已存在；新增 `iteration_start`。Provider 保留已有的可选字段 `usage` 事件，后续再按真实协议调整用量结构。
@@ -99,11 +99,11 @@
 
 ## T5: `Provider.stream()` 签名升级与适配器扩展（已完成基础校准）
 
-**文件：** `src/providers/types.ts` / `src/providers/create-provider.ts`、`src/providers/anthropic.ts`、`src/providers/openai.ts`、`src/providers/errors.ts`
+**文件：** `src/llm/events.ts` / `src/llm/client.ts`、`src/llm/anthropic.ts`、`src/llm/openai.ts`、`src/llm/client.ts`
 **依赖：** T1
 **步骤：**
-1. `src/providers/errors.ts`：导出错误类——`LLMError`（基类）、`AuthenticationError`、`ContextTooLongError`、`RateLimitError`（带 `retryAfter?: string` 字段）、`NetworkError`。
-2. `providers/types.ts`：沿用 `Provider.stream(request)`，确认 `ChatRequest` 同时携带 systemPrompt、messages、tools 与 signal；不新增位置参数或占位副接口。
+1. `src/llm/client.ts`：导出错误类——`LLMError`（基类）、`AuthenticationError`、`ContextTooLongError`、`RateLimitError`（带 `retryAfter?: string` 字段）、`NetworkError`。
+2. `llm/client.ts`：沿用 `Provider.stream(request)`，确认 `ChatRequest` 同时携带 systemPrompt、messages、tools 与 signal；不新增位置参数或占位副接口。
 3. `anthropic.ts`：`async *stream(...)`——
    - 构造 `params`：`model`、`max_tokens`、`system: this.systemPrompt`、`tools`、`messages: toAnthropicMessages(conv.getMessages())`、`signal: abortSignal`。
    - 用 `for await (const event of this.client.messages.stream(params))` 翻译事件：`content_block_delta.text_delta` → `text_delta`、`content_block_delta.input_json_delta` 拼到该 tool 的 args buffer、`content_block_stop` 把 buffer JSON.parse 后 yield `tool_call_complete`、`message_stop` 读 `event.message.stop_reason` 与 `event.message.usage` yield `stream_end`。
@@ -114,7 +114,7 @@
 
 **实际结果：** 当前 `Provider.stream(request)` 已接收包含 `systemPrompt`、`messages`、`tools`、`signal` 的 `ChatRequest`；两个原生 fetch Provider 已支持 SSE 分片、工具调用、usage、错误归一化和取消。第 03 章第 2 次只补充 Anthropic 流提前关闭时的统一 `done` 事件，避免未来 Loop 等待不到一轮结束。
 
-**验证：** `tests/providers/anthropic.test.ts`、`tests/providers/openai.test.ts` 与 `pnpm typecheck` 通过。
+**验证：** `tests/llm/anthropic.test.ts`、`tests/llm/openai.test.ts` 与 `pnpm typecheck` 通过。
 
 ## T6: `Agent` ReAct 循环主体（核心）
 

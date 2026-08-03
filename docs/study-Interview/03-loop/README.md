@@ -116,7 +116,7 @@ Loop 依赖一轮流结束后才判断是否执行工具。如果 Anthropic SSE 
 Provider 用 doneEmitted 记录正常结束；流自然结束但还没发 done 时补发一个 done，给上层一致的收尾语义。
 ```
 
-证据：[anthropic.ts](../../../../src/providers/anthropic.ts:51)、[anthropic.ts](../../../../src/providers/anthropic.ts:150)、[anthropic.test.ts](../../../../tests/providers/anthropic.test.ts:105)。
+证据：[anthropic.ts](../../../../src/llm/anthropic.ts:51)、[anthropic.ts](../../../../src/llm/anthropic.ts:150)、[anthropic.test.ts](../../../../tests/llm/anthropic.test.ts:105)。
 
 ### Q9. 如何控制多轮 Agent 的成本和上下文膨胀？
 

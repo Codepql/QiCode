@@ -1,12 +1,12 @@
 # QiCode 第04阶段任务清单：系统提示工程化
 
-> 状态：开发中。T1 已完成，等待下一阶段 T2。
+> 状态：开发中。T1、T2 已完成，等待下一阶段稳定提示词接线。
 >
 > 前置章节：01-LLM、02-Tools、03-Agent Loop。所有命令使用 pnpm；开发运行 `pnpm dev`，聚焦测试使用 `pnpm test -- <path>`，类型检查 `pnpm typecheck`，构建 `pnpm build`。
 >
 > 每个行为任务遵循测试先行，并在完成后记录真实实现位置和验证证据。
 
-> 模块路径在 `src/prompt/`、`src/providers/`、`src/agent/`、`src/tools/`、`src/conversation/`、`src/tui/` 下;运行时 Node.js 22 LTS + TypeScript 5.x,`pnpm test` 执行单测、`pnpm typecheck` 类型检查。
+> 模块路径在 `src/prompt/`、`src/llm/`、`src/agent/`、`src/tools/`、`src/conversation/`、`src/tui/` 下;运行时 Node.js 22 LTS + TypeScript 5.x,`pnpm test` 执行单测、`pnpm typecheck` 类型检查。
 
 ## 文件清单
 
@@ -15,10 +15,10 @@
 | 新建 | `src/prompt/sections.ts` | `Section` 接口、`EnvironmentContext` 接口;八个固定 Section 工厂(identitySection ... environmentSection) |
 | 新建 | `src/prompt/builder.ts` | `PromptBuilder` 类、`detectEnvironment(workDir)`、`BuildOptions` 接口、`buildSystemPrompt(env, opts?)` |
 | 新建 | `src/prompt/plan-mode.ts` | `buildPlanModeReminder / buildPlanModeExitReminder / buildPlanModeReentryReminder` + `reminderInterval` 常量 + 完整/精简提醒模板 |
-| 改   | `src/providers/types.ts` | `UsageInfo` 增加 `cacheReadInputTokens / cacheCreationInputTokens` 两字段 |
-| 改   | `src/providers/anthropic.ts` | 构造器接收 `systemPrompt`;`stream()` 中 system 单 TextBlockParam + ephemeral 断点;末 tool / `markLastUserTailForCache` 加 ephemeral;解析 `cache_read_input_tokens / cache_creation_input_tokens` |
-| 改   | `src/providers/openai.ts` | `OpenAIProvider / OpenAIProvider` 构造器接收 `systemPrompt`;Responses input / Chat messages 前缀 system;解析 `input_tokens_details / prompt_tokens_details.cached_tokens`;`inputTokens` 减除避免双计 |
-| 改   | `src/providers/types.ts` / `src/providers/create-provider.ts` | `createProvider(cfg, systemPrompt)` 工厂分发两协议 |
+| 改   | `src/llm/events.ts` | `UsageInfo` 增加 `cacheReadInputTokens / cacheCreationInputTokens` 两字段 |
+| 改   | `src/llm/anthropic.ts` | 构造器接收 `systemPrompt`;`stream()` 中 system 单 TextBlockParam + ephemeral 断点;末 tool / `markLastUserTailForCache` 加 ephemeral;解析 `cache_read_input_tokens / cache_creation_input_tokens` |
+| 改   | `src/llm/openai.ts` | `OpenAIProvider / OpenAIProvider` 构造器接收 `systemPrompt`;Responses input / Chat messages 前缀 system;解析 `input_tokens_details / prompt_tokens_details.cached_tokens`;`inputTokens` 减除避免双计 |
+| 改   | `src/llm/client.ts` / `src/llm/events.ts` | `createProvider(cfg, systemPrompt)` 工厂分发两协议 |
 | 沿用 | `src/conversation/conversation.ts` | `addSystemReminder(content)` 包 `<system-reminder>` 标签写入 history;`injectLongTermMemory` 头插一条 system-reminder user 消息 |
 | 改   | `src/agent/agent.ts` | `run()` 每轮 `manageContext` 后注入 plan-mode / active-skills / hook reminder;`buildActiveSkillsReminder(activeSkills)` 内部辅助函数 |
 | 改/沿用 | `src/tools/descriptions.ts` | `BashDescription` 含「Avoid using this tool to run cat, head, tail...」;`EditFileDescription` 含「You MUST read the file with ReadFile before editing」 |
@@ -51,7 +51,9 @@
 
 **验证:** 已新增聚焦用例覆盖 Section 名称、优先级和环境可选行；按用户要求本阶段不运行自动化测试，仅执行类型检查。
 
-## T2: PromptBuilder 与 buildSystemPrompt**文件:** `src/prompt/builder.ts`
+## T2: PromptBuilder 与 buildSystemPrompt（已完成）
+
+**文件:** `src/prompt/builder.ts`、`tests/prompt/builder.test.ts`
 **依赖:** T1
 **步骤:**
 1. `import { execFile } from "node:child_process"; import { promisify } from "node:util"; import { platform, arch } from "node:os"; import type { Section, EnvironmentContext } from "./sections.js"; import { identitySection, ..., environmentSection } from "./sections.js";`
@@ -68,7 +70,9 @@
    - `opts.memorySection` → `b.add({ name:"Memory", priority:100, content: opts.memorySection })`。
    - return b.build()。
 
-**验证:** `pnpm typecheck` 无报错；`pnpm test -- tests/prompt-builder.test.ts` 通过；调用点已正确 `await detectEnvironment(...)`。
+**实际实现:** `PromptBuilder` 已支持链式挂载、按优先级稳定组装、trim 与跳空；`detectEnvironment()` 已采集基础运行信息并对 Git 失败降级；`buildSystemPrompt()` 已挂载八个固定模块及三个可选槽位。本阶段按拆分计划暂不接入 TUI，调用点将在下一阶段统一改造。
+
+**验证:** 已新增聚焦测试覆盖排序、跳空、稳定输出、可选模块和环境降级；按用户要求不运行自动化测试，仅执行类型检查。
 
 ## T3: 规划模式 reminder 构造器**文件:** `src/prompt/plan-mode.ts`
 **依赖:** 无
@@ -85,15 +89,15 @@
 
 **验证:** `pnpm test -- tests/plan-mode-reminder.test.ts` 断言 iteration=1 含「Plan mode is active」、iteration=2 含「Plan mode still active」、iteration=6 含「Plan mode is active」(完整)。
 
-## T4: UsageInfo 与 Provider 接口**文件:** `src/providers/types.ts`、`src/providers/types.ts` / `src/providers/create-provider.ts`
+## T4: UsageInfo 与 Provider 接口**文件:** `src/llm/events.ts`、`src/llm/client.ts`
 **依赖:** 无
 **步骤:**
-1. `src/providers/types.ts`:`UsageInfo` 增加 `cacheReadInputTokens: number; cacheCreationInputTokens: number`;`stream_end` 事件的 `usage` 类型自动跟随更新。
-2. `src/providers/types.ts` / `src/providers/create-provider.ts`:确认 `createProvider(cfg: ProviderConfig, systemPrompt: string)` 签名;两协议分支 dynamic import 并 `new XxxClient(cfg, systemPrompt)`。
+1. `src/llm/events.ts`:`UsageInfo` 增加 `cacheReadInputTokens: number; cacheCreationInputTokens: number`;`stream_end` 事件的 `usage` 类型自动跟随更新。
+2. `src/llm/client.ts`:确认 `createProvider(cfg: ProviderConfig, systemPrompt: string)` 签名;两协议分支 dynamic import 并 `new XxxClient(cfg, systemPrompt)`。
 
 **验证:** `pnpm typecheck` 通过;旧 client 实现暂时编译失败(T5/T6 修复)。
 
-## T5: Anthropic adapter 改造**文件:** `src/providers/anthropic.ts`
+## T5: Anthropic adapter 改造**文件:** `src/llm/anthropic.ts`
 **依赖:** T4
 **步骤:**
 1. `constructor(cfg, systemPrompt)`:把 systemPrompt 存为 `this.systemPrompt`;沿用 `this.model / this.thinking / this.maxOutputTokens / this.contextWindow` 字段。
@@ -110,7 +114,7 @@
 
 ## T6: OpenAI Provider 改造
 
-**文件:** `src/providers/openai.ts`
+**文件:** `src/llm/openai.ts`
 **依赖:** T4
 **步骤:**
 1. `OpenAIProvider.constructor(cfg, systemPrompt)`:存 `this.systemPrompt`;`this.client = new OpenAI({ apiKey, baseURL })`。

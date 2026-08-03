@@ -14,7 +14,7 @@
 - [ ] `EditFile` 唯一匹配替换成功；0 处与 >1 处返回**可区分**错误（含匹配数）；`replace_all: true` 时多次匹配也成功（验证：`pnpm test -- tests/tools/edit-file.test.ts` 四情形）。(AC4/F2)
 - [ ] `Bash` 返回 stdout/stderr/退出码；超时命令被终止并返回 `Error: command timed out after Ns`；`grep` / `diff` 退出 1 不被标 `isError`（验证：`pnpm test -- tests/tools/bash.test.ts` 三情形）。(AC5/F2/N1)
 - [ ] `Glob` 用 `fast-glob` 列出匹配文件、按 mtime 倒序；`Grep` 返回 `file:line:content`（验证：`pnpm test -- tests/tools/{glob,grep}.test.ts` 命中已知关键字与 `**/*.ts`）。(AC6/F2)
-- [x] 流式工具调用解析正确：Anthropic `partial_json` 与 OpenAI `tool_calls[*].arguments` 都由 Provider 拼成完整 JSON。（`tests/providers/{anthropic,openai}.test.ts`）(AC7/F4)
+- [x] 流式工具调用解析正确：Anthropic `partial_json` 与 OpenAI `tool_calls[*].arguments` 都由 Provider 拼成完整 JSON。（`tests/llm/{anthropic,openai}.test.ts`）(AC7/F4)
 - [x] 单轮闭环：第一批工具执行并回灌后，第二次模型请求生成最终文本。（`tests/agent/agent.test.ts`）(AC8/F5/F6)
 - [x] 单轮上限：第二次请求仍产生工具调用时会显示上限错误且不执行第二批。（`tests/agent/agent.test.ts`）(AC9/F6)
 - [ ] 工具行 Claude Code 风格：执行中 `● ToolName args`（magenta `●`），结束 `✓` / `✗ ToolName args (Ns)` + 缩进结果摘要，过长截断为 `…`（验证：端到端跑一次工具任务，肉眼比对终端输出 + scrollback 顺序正确）。(AC11/F8)
@@ -23,7 +23,7 @@
 ## 集成
 
 - [ ] 两协议工具流程一致：分别用 Anthropic、OpenAI 官方地址与 OpenAI 兼容地址运行同一任务；protocol 始终只有 `anthropic` / `openai`，上层行为一致。(AC10/F3/F7/N3)
-- [x] 结果回灌进历史并被第二轮请求携带：`Conversation.addAssistantMessage` / `addToolResultsMessage` 与两个 Provider 历史映射均已覆盖。（`tests/agent/agent.test.ts`、`tests/providers/{anthropic,openai}.test.ts`）(F6/F7)
+- [x] 结果回灌进历史并被第二轮请求携带：`Conversation.addAssistantMessage` / `addToolResultsMessage` 与两个 Provider 历史映射均已覆盖。（`tests/agent/agent.test.ts`、`tests/llm/{anthropic,openai}.test.ts`）(F6/F7)
 - [ ] 工具执行不阻塞界面：执行期间 `ChatMessage(role: "tool_use", loading)` 在动态区渲染 `● ToolName args`，Ink Spinner 持续旋转，键盘可响应（验证：跑一个稍慢的 bash 命令观察界面不冻结）。(N2)
 - [ ] scrollback 顺序正确：preamble 文本 → 工具行 → 结果摘要 → 最终答复 按序通过 `<Static>` 提交不交错（验证：多工具任务后回滚查看顺序）。(F8)
 - [x] 结果体量受控：`ReadFile` 默认 2000 行；`Bash` 10 MB；`Glob` 1000；`Grep` 500；Agent 层 `MAX_TOOL_OUTPUT_CHARS = 10000` 兜底。（`tests/agent/agent.test.ts`）(AC13/N5)

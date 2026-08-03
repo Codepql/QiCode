@@ -19,10 +19,10 @@
 | 新建 | `src/compact/compact.ts` | `manageContext` / `forceCompact` / `doCompact` / `currentContextTokens` / `computeKeepStartIndex` / `AutoCompactTrackingState` / `UsageAnchor` |
 | 新建 | `src/compact/recovery.ts` | `RecoveryState` / `FileReadRecord` / `SkillInvocationRecord` / `buildRecoveryAttachment` |
 | 修改 | `src/conversation/conversation.ts` | 新增 `replaceWithCompacted(summaryContent, keep)` |
-| 修改 | `src/providers/errors.ts` | 新增 `ContextTooLongError` 哨兵类 |
-| 修改 | `src/providers/anthropic.ts` | 状态 400 + `prompt is too long` → 抛 `ContextTooLongError` |
-| 修改 | `src/providers/openai.ts` | `context_length_exceeded` → 抛 `ContextTooLongError` |
-| 修改 | `src/providers/types.ts` | `UsageInfo` 加 `cacheReadInputTokens` / `cacheCreationInputTokens` |
+| 修改 | `src/llm/client.ts` | 新增 `ContextTooLongError` 哨兵类 |
+| 修改 | `src/llm/anthropic.ts` | 状态 400 + `prompt is too long` → 抛 `ContextTooLongError` |
+| 修改 | `src/llm/openai.ts` | `context_length_exceeded` → 抛 `ContextTooLongError` |
+| 修改 | `src/llm/events.ts` | `UsageInfo` 加 `cacheReadInputTokens` / `cacheCreationInputTokens` |
 | 修改 | `src/session/session.ts` | `COMPACT_BOUNDARY` 常量、`KeptMessage` / `CompactBoundaryPayload`、`saveCompactBoundary`、`rebuildFromSession` 含 boundary 分支 |
 | 修改 | `src/agent/agent.ts` | 主循环集成 `manageContext` + `applyBudget` + ContextTooLongError 自愈 + `usageAnchor` 维护 + ReadFile recordFileRead |
 | 修改 | `src/agent/events.ts` | `AgentEvent` 加 `{ type: "compact"; message; boundary? }` |
@@ -117,17 +117,17 @@
   2. 不做额外深拷贝（keep 切片由调用方保证一致性）；后续若需要可改成深拷贝。
 - **验证**：`pnpm typecheck` 通过；测试用例 `tests/conversation.test.ts` 验证替换后 `getMessages()[0].role === "user" && getMessages()[0].content === summaryContent`。
 
-## T7 - UsageInfo 新增 cache 字段- **文件**：`src/providers/types.ts`
+## T7 - UsageInfo 新增 cache 字段- **文件**：`src/llm/events.ts`
 - **依赖**：无
 - **步骤**：
   1. 修改 `UsageInfo` 接口：在已有 `inputTokens` / `outputTokens` 之后追加 `cacheReadInputTokens: number;` 与 `cacheCreationInputTokens: number;`。
-  2. 同步更新 `src/providers/anthropic.ts` 与 `src/providers/openai.ts` 解析 usage 的位置：anthropic 从 `usage.cache_read_input_tokens` / `usage.cache_creation_input_tokens` 取值；openai 从 `prompt_tokens_details?.cached_tokens` 取 cache_read（cache_creation 通常 0）。
+  2. 同步更新 `src/llm/anthropic.ts` 与 `src/llm/openai.ts` 解析 usage 的位置：anthropic 从 `usage.cache_read_input_tokens` / `usage.cache_creation_input_tokens` 取值；openai 从 `prompt_tokens_details?.cached_tokens` 取 cache_read（cache_creation 通常 0）。
 - **验证**：`pnpm typecheck` 通过；现有 anthropic / openai 测试仍跑通。
 
-## T8 - ContextTooLongError 哨兵- **文件**：`src/providers/errors.ts`
+## T8 - ContextTooLongError 哨兵- **文件**：`src/llm/client.ts`
 - **依赖**：无
 - **步骤**：
-  1. 在 `src/providers/errors.ts` 末尾新增：
+  1. 在 `src/llm/client.ts` 末尾新增：
      ```typescript
      export class ContextTooLongError extends LLMError {
        constructor(message: string) {
@@ -136,8 +136,8 @@
        }
      }
      ```
-  2. 在 `src/providers/anthropic.ts` 的错误映射处（HTTP 400 分支）：若 `err.message?.includes("prompt is too long")` 则 `return new ContextTooLongError("Context too long: " + err.message)`。
-  3. 在 `src/providers/openai.ts` 的错误映射处：若错误 code/message 命中 `context_length_exceeded` 同样 `return new ContextTooLongError(...)`。
+  2. 在 `src/llm/anthropic.ts` 的错误映射处（HTTP 400 分支）：若 `err.message?.includes("prompt is too long")` 则 `return new ContextTooLongError("Context too long: " + err.message)`。
+  3. 在 `src/llm/openai.ts` 的错误映射处：若错误 code/message 命中 `context_length_exceeded` 同样 `return new ContextTooLongError(...)`。
 - **验证**：`pnpm typecheck` 通过；测试构造 fixture 错误 → catch 后 `err instanceof ContextTooLongError === true`。
 
 ## T9 - RecoveryState 基础结构- **文件**：`src/compact/recovery.ts`

@@ -124,7 +124,7 @@ Conversation: [..., assistant(最终文本)]
 
 ### D8：Provider 流缺结束事件怎么办
 
-- 断点：[anthropic.ts](../../../../src/providers/anthropic.ts:150)。
+- 断点：[anthropic.ts](../../../../src/llm/anthropic.ts:150)。
 - 观察：`doneEmitted`。
 - 证明：即使服务端异常地没发 `message_stop`，Provider 也补一个 `done`，Loop 不会无限等待。
 
@@ -165,7 +165,7 @@ Conversation: [..., assistant(最终文本)]
 
 ### 实验 6：Anthropic 流提前关闭
 
-- 制造：看 [anthropic.test.ts](../../../../tests/providers/anthropic.test.ts:105)，模拟没有 `message_stop` 的 SSE。
+- 制造：看 [anthropic.test.ts](../../../../tests/llm/anthropic.test.ts:105)，模拟没有 `message_stop` 的 SSE。
 - 预期：末尾仍得到 `{ type: "done" }`。
 - 学到：流协议必须有收尾兜底，否则上层状态机可能卡住。
 
@@ -179,7 +179,7 @@ Conversation: [..., assistant(最终文本)]
 4. 流错误时历史仍合法。
 5. 结果截断、只读并发/写入串行、Plan Mode 拒绝写入。
 
-再读 [anthropic.test.ts](../../../../tests/providers/anthropic.test.ts:105)，理解 Provider 的收尾事件为什么是 Loop 的前置条件。
+再读 [anthropic.test.ts](../../../../tests/llm/anthropic.test.ts:105)，理解 Provider 的收尾事件为什么是 Loop 的前置条件。
 
 ## 8. 当前局限与完成标准
 

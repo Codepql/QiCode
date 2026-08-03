@@ -1,10 +1,14 @@
-import type { ProviderConfig } from "../config/types.js";
-import type { ConversationMessage } from "../conversation/types.js";
-
 export interface ToolDefinition {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+}
+
+export interface UsageInfo {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadInputTokens?: number;
+  cacheCreationInputTokens?: number;
 }
 
 export type StreamEvent =
@@ -23,23 +27,5 @@ export type StreamEvent =
       toolName: string;
       arguments: Record<string, unknown>;
     }
-  | {
-      type: "usage";
-      inputTokens?: number;
-      outputTokens?: number;
-      cacheReadInputTokens?: number;
-      cacheCreationInputTokens?: number;
-    }
+  | ({ type: "usage" } & UsageInfo)
   | { type: "done"; stopReason?: string };
-
-export interface ChatRequest {
-  systemPrompt: string;
-  messages: ConversationMessage[];
-  tools?: ToolDefinition[];
-  signal?: AbortSignal;
-}
-
-export interface Provider {
-  readonly config: ProviderConfig;
-  stream(request: ChatRequest): AsyncIterable<StreamEvent>;
-}

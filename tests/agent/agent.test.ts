@@ -3,7 +3,8 @@ import { Agent, MAX_TOOL_OUTPUT_CHARS } from "../../src/agent/agent.js";
 import type { AgentEvent } from "../../src/agent/events.js";
 import { Conversation } from "../../src/conversation/conversation.js";
 import { PermissionChecker } from "../../src/permissions/checker.js";
-import type { ChatRequest, Provider, StreamEvent } from "../../src/providers/types.js";
+import type { ChatRequest, Provider } from "../../src/llm/client.js";
+import type { StreamEvent } from "../../src/llm/events.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
 import type { Tool } from "../../src/tools/types.js";
 

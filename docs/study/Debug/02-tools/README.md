@@ -55,8 +55,8 @@ App.submit()                         src/tui/app.tsx
 | `src/agent/streaming-executor.ts` | 查找并并发执行已经完整的工具调用 | Agent | ToolRegistry、具体 Tool | 把“执行工具”与“请求模型”分开 |
 | `src/tools/registry.ts` | 按名字管理工具、导出 schema | App、Agent | Tool 接口 | Provider 和 Agent 不必依赖六个具体工具类 |
 | `src/tools/*.ts` | 读、写、改、命令、找文件、搜内容 | StreamingExecutor | Node 文件系统 / 子进程 / fast-glob | 每种副作用和错误处理不同，不能塞进一个大文件 |
-| `src/providers/anthropic.ts` | Anthropic 请求、工具 JSON 分片拼接、历史映射 | Agent | SSE、HTTP | 隔离 Anthropic 格式和 thinking 规则 |
-| `src/providers/openai.ts` | OpenAI/兼容端点请求、工具 JSON 分片拼接、历史映射 | Agent | SSE、HTTP | 隔离 `delta.tool_calls` 格式 |
+| `src/llm/anthropic.ts` | Anthropic 请求、工具 JSON 分片拼接、历史映射 | Agent | SSE、HTTP | 隔离 Anthropic 格式和 thinking 规则 |
+| `src/llm/openai.ts` | OpenAI/兼容端点请求、工具 JSON 分片拼接、历史映射 | Agent | SSE、HTTP | 隔离 `delta.tool_calls` 格式 |
 | `src/conversation/conversation.ts` | 保存 user、assistant、tool use、tool result | App、Agent、Provider | 消息类型 | “显示在屏幕上”不等于“下一轮发给模型” |
 | `src/tui/chat-view.tsx` | 从历史与动态状态渲染正文和工具块 | App | ToolDisplay、Markdown | 让展示规则不污染 Agent |
 
@@ -96,8 +96,8 @@ App.submit()                         src/tui/app.tsx
 
 ### D3. 模型工具调用如何从 SSE 变成参数对象
 
-- Anthropic：断点 [anthropic.ts](../../../src/providers/anthropic.ts:101)，观察 `argumentsDelta` 和 `toolCalls`。
-- OpenAI：断点 [openai.ts](../../../src/providers/openai.ts:93)，观察 `deltaToolCalls`、`index`、`argumentsJson`。
+- Anthropic：断点 [anthropic.ts](../../../src/llm/anthropic.ts:101)，观察 `argumentsDelta` 和 `toolCalls`。
+- OpenAI：断点 [openai.ts](../../../src/llm/openai.ts:93)，观察 `deltaToolCalls`、`index`、`argumentsJson`。
 - 证明：网络可能把 `{"file_path":"README.md"}` 拆成多段；Provider 必须累计分片，不能每段直接 `JSON.parse()`。
 
 ### D4. Agent 何时决定执行工具
@@ -157,7 +157,7 @@ App.submit()                         src/tui/app.tsx
 
 ### 实验 4：工具参数 JSON 被拆包
 
-- 制造：查看 [tests/providers/openai.test.ts](../../../tests/providers/openai.test.ts:56)，将参数拆成更多段。
+- 制造：查看 [tests/llm/openai.test.ts](../../../tests/llm/openai.test.ts:56)，将参数拆成更多段。
 - 断点：`OpenAIProvider.stream()` 的 `argumentsJson += argumentsDelta`。
 - 预期：最终 `tool_call_complete.arguments` 仍是完整对象。
 - 学到：流式传输中“事件已到”不代表“参数已完整”。
@@ -185,7 +185,7 @@ App.submit()                         src/tui/app.tsx
 3. 第二次仍请求工具时，系统拒绝执行第二批。
 4. 超大工具输出会被截断。
 
-然后读两个 Provider 测试：[tests/providers/anthropic.test.ts](../../../tests/providers/anthropic.test.ts:66) 和 [tests/providers/openai.test.ts](../../../tests/providers/openai.test.ts:56)。它们证明两种协议虽然 JSON 不同，但都能输出同一种 `StreamEvent`。
+然后读两个 Provider 测试：[tests/llm/anthropic.test.ts](../../../tests/llm/anthropic.test.ts:66) 和 [tests/llm/openai.test.ts](../../../tests/llm/openai.test.ts:56)。它们证明两种协议虽然 JSON 不同，但都能输出同一种 `StreamEvent`。
 
 ## 8. 本章完成标准
 

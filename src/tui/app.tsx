@@ -4,9 +4,7 @@ import { Agent } from "../agent/agent.js";
 import type { ProviderConfig } from "../config/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import type { ConversationMessage } from "../conversation/types.js";
-import { createProvider } from "../providers/create-provider.js";
-import { formatProviderError } from "../providers/errors.js";
-import type { Provider } from "../providers/types.js";
+import { createProvider, formatProviderError, type Provider } from "../llm/client.js";
 import { buildSystemPrompt } from "../prompt/system-prompt.js";
 import { BashTool } from "../tools/bash.js";
 import { EditFileTool } from "../tools/edit-file.js";
@@ -62,10 +60,6 @@ export function App({
     if (exitHintTimerRef.current) clearTimeout(exitHintTimerRef.current);
   }, []);
 
-  useEffect(() => {
-    providerRef.current = selectedConfig ? createProvider(selectedConfig) : undefined;
-  }, [selectedConfig]);
-
   useInput((input, key) => {
     if (key.escape && busy) {
       abortRef.current?.abort();
@@ -106,9 +100,8 @@ export function App({
   }
 
   async function submit(rawText: string): Promise<void> {
-    const provider = providerRef.current;
     const config = selectedConfig;
-    if (busy || !provider || !config) return;
+    if (busy || !config) return;
     if (rawText.trim() === "/exit") {
       exit();
       return;
@@ -134,6 +127,8 @@ export function App({
     }, requestTimeoutMs);
     let agentFailed = false;
     try {
+      const provider = providerRef.current ?? await createProvider(config);
+      providerRef.current = provider;
       const registry = createToolRegistry();
       const agent = new Agent({
         provider,

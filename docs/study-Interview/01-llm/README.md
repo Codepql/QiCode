@@ -60,7 +60,7 @@ Provider 会因供应商协议变化，SSE 会因流式传输边界变化，会�
 当前核心依赖方向是 App -> Provider 接口 -> 协议实现 -> 通用 SSE，反向不依赖 Ink。
 ```
 
-代码证据：`src/tui/app.tsx`、`src/providers/types.ts`、`src/providers/sse.ts`。
+代码证据：`src/tui/app.tsx`、`src/llm/events.ts`、`src/llm/client.ts`。
 
 Debug 证据：架构地图、D3、D5。
 
@@ -77,7 +77,7 @@ Anthropic 和 OpenAI 各自负责协议映射，App 只消费统一事件。
 这样新增协议主要增加一个适配器并扩展工厂，不需要重写主对话状态机。
 ```
 
-代码证据：`src/providers/types.ts`、`src/providers/create-provider.ts`、两个 Provider 实现。
+代码证据：`src/llm/events.ts`、`src/llm/client.ts`、两个 Provider 实现。
 
 追问“新增 Gemini 改哪里”：增加 Gemini Provider、扩展配置协议和工厂；若统一事件已足够，Conversation 和主要 TUI 流程不改。
 

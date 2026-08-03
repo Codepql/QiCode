@@ -46,7 +46,7 @@ src/
 依赖方向：
 
 - `src/toolresult/` 不依赖 `src/compact/`、不依赖 `src/agent/`。
-- `src/compact/` 依赖 `src/conversation/`、`src/providers/`、`src/session/`，但不依赖 `src/agent/`、`src/tui/`、`src/tools/`。`recovery.ts` 接受 `toolSchemaNames: string[]` 而非 `ToolRegistry`，避免反向耦合。
+- `src/compact/` 依赖 `src/conversation/`、`src/llm/`、`src/session/`，但不依赖 `src/agent/`、`src/tui/`、`src/tools/`。`recovery.ts` 接受 `toolSchemaNames: string[]` 而非 `ToolRegistry`，避免反向耦合。
 - `src/agent/agent.ts` 是唯一同时持有 `Provider`、`ConversationManager`、`ToolRegistry`、`RecoveryState`、`ContentReplacementState`、`AutoCompactTrackingState` 的地方；它每轮把这些注入 `applyBudget` 与 `manageContext`。
 - `src/tui/app.tsx` 把 `forceCompact` 的结果回写 conversation 并调 `saveCompactBoundary` 持久化。
 
@@ -318,7 +318,7 @@ export function rebuildFromSession(saved: SessionMessage[]): RestoredMessage[];
 ```
 
 ```typescript
-// src/providers/errors.ts
+// src/llm/client.ts
 export class ContextTooLongError extends LLMError { /* 哨兵：状态 400 + "prompt is too long" */ }
 export class RateLimitError extends LLMError { retryAfter?: string; }
 ```
@@ -630,7 +630,6 @@ src/
 │   └── conversation.ts         — ConversationManager / replaceWithCompacted
 ├── llm/
 │   ├── client.ts               — Provider 接口、createProvider 工厂
-│   ├── errors.ts               — ContextTooLongError 哨兵
 │   ├── anthropic.ts            — Anthropic provider；400 + "prompt is too long" 时构造 ContextTooLongError
 │   ├── openai.ts               — OpenAI Provider
 │   └── events.ts               — StreamEvent / UsageInfo（cache token 字段）
