@@ -42,6 +42,12 @@ export class EditFileTool implements Tool {
     }
 
     const absolutePath = resolve(ctx.workDir, filePath);
+    if (ctx.readFiles && !ctx.readFiles.has(absolutePath)) {
+      return {
+        output: `错误：编辑前必须先使用 ReadFile 读取文件：${filePath}`,
+        isError: true,
+      };
+    }
     try {
       const content = await readFile(absolutePath, "utf8");
       const count = content.split(oldString).length - 1;

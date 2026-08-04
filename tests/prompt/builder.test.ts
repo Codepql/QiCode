@@ -1,3 +1,6 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   PromptBuilder,
@@ -45,6 +48,27 @@ describe("PromptBuilder", () => {
 });
 
 describe("buildSystemPrompt", () => {
+  it("assembles all fixed sections and tool guidance in priority order", () => {
+    const prompt = buildSystemPrompt(fakeEnvironment);
+    const markers = [
+      "你是 QiCode",
+      "# 系统约定",
+      "# 任务执行",
+      "# 谨慎执行操作",
+      "# 使用你的工具",
+      "# 语气与风格",
+      "# 文本输出",
+      "# 环境",
+    ];
+
+    const positions = markers.map((marker) => prompt.indexOf(marker));
+    expect(positions.every((position) => position >= 0)).toBe(true);
+    expect(positions).toEqual([...positions].sort((left, right) => left - right));
+    expect(prompt).toContain("ReadFile");
+    expect(prompt).toContain("Bash");
+    expect(prompt).toContain("EditFile");
+  });
+
   it("returns stable output for the same environment", () => {
     expect(buildSystemPrompt(fakeEnvironment)).toBe(
       buildSystemPrompt(fakeEnvironment),
@@ -70,11 +94,19 @@ describe("buildSystemPrompt", () => {
 
 describe("detectEnvironment", () => {
   it("returns a usable environment even outside a Git repository", async () => {
-    const env = await detectEnvironment(process.env.TEMP ?? process.cwd());
+    const workDir = await mkdtemp(join(tmpdir(), "qicode-prompt-"));
 
-    expect(env.workDir).not.toBe("");
-    expect(env.os).not.toBe("");
-    expect(env.arch).not.toBe("");
-    expect(env.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    try {
+      const env = await detectEnvironment(workDir);
+
+      expect(env.workDir).toBe(workDir);
+      expect(env.os).not.toBe("");
+      expect(env.arch).not.toBe("");
+      expect(env.isGitRepo).toBe(false);
+      expect(env.gitBranch).toBe("");
+      expect(env.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    } finally {
+      await rm(workDir, { recursive: true, force: true });
+    }
   });
 });

@@ -7,7 +7,11 @@ import type {
 } from "../conversation/types.js";
 import type { Provider } from "../llm/client.js";
 import type { StreamEvent, ToolDefinition } from "../llm/events.js";
-import { buildPlanModeReminder } from "../prompt/plan-mode.js";
+import {
+  buildPlanModeReminder,
+  getPlanPath,
+  planFileExists,
+} from "../prompt/plan-mode.js";
 import { PermissionChecker } from "../permissions/checker.js";
 import { ToolRegistry } from "../tools/registry.js";
 import type { ToolCategory } from "../tools/types.js";
@@ -31,6 +35,8 @@ export interface AgentConfig {
 }
 
 export class Agent {
+  readonly #readFiles = new Set<string>();
+
   constructor(private readonly config: AgentConfig) {}
 
   async *run(): AsyncGenerator<AgentEvent> {
@@ -46,7 +52,14 @@ export class Agent {
 
       yield { type: "iteration_start", iteration };
       if (permissionChecker.mode === "plan") {
-        this.config.conversation.addSystemReminder(buildPlanModeReminder());
+        const planPath = getPlanPath(this.config.workDir);
+        this.config.conversation.addSystemReminder(
+          buildPlanModeReminder(
+            planPath,
+            planFileExists(planPath),
+            iteration,
+          ),
+        );
       }
       const response = createCollectedResponse();
       const tools = toolDefinitions(this.config.registry, permissionChecker);
@@ -205,6 +218,7 @@ export class Agent {
   ): Promise<ToolExecution[]> {
     const executor = new StreamingExecutor(this.config.registry, {
       workDir: this.config.workDir,
+      readFiles: this.#readFiles,
       ...(this.config.abortSignal === undefined ? {} : { abortSignal: this.config.abortSignal }),
     });
     const blocked: ToolExecution[] = [];

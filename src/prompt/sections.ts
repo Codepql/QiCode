@@ -74,9 +74,10 @@ export function usingToolsSection(): Section {
     priority: 40,
     content: [
       "# 使用你的工具",
-      "- ReadFile：读取已知文件；不要用 Bash 运行 cat、head 或 tail 代替读取。",
+      "- 有专用工具时绝不要使用 Bash 代替它。",
+      "- ReadFile：读取已知文件；不要用 Bash 运行 cat、head、tail 或 echo 代替读取。",
       "- Glob：按名称或路径模式查找文件；Grep：搜索文件内容。不要用 Bash 拼接等价搜索命令。",
-      "- EditFile：精确修改已有内容；编辑前必须先用 ReadFile 读取并确认最新上下文，不要用 sed 或 awk 代替。",
+      "- EditFile：精确修改已有内容；编辑前必须先用 ReadFile 读取并确认最新上下文，否则编辑会被拒绝；不要用 sed 或 awk 代替。",
       "- WriteFile：创建或完整覆盖文件；覆盖已有文件前先读取并确认影响。",
       "- Bash：仅用于没有专用工具覆盖的命令执行场景，不要用它代替 ReadFile、Glob、Grep、EditFile 或 WriteFile。",
     ].join("\n"),

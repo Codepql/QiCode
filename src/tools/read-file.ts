@@ -43,6 +43,7 @@ export class ReadFileTool implements Tool {
 
       const content = await readFile(absolutePath, "utf8");
       const lines = content.split("\n").slice(offset, offset + limit);
+      ctx.readFiles?.add(absolutePath);
       return {
         output: lines
           .map((line, index) => `${offset + index + 1}\t${line.replace(/\r$/, "")}`)

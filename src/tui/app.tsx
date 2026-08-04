@@ -5,7 +5,15 @@ import type { ProviderConfig } from "../config/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import type { ConversationMessage } from "../conversation/types.js";
 import { createProvider, formatProviderError, type Provider } from "../llm/client.js";
-import { buildSystemPrompt } from "../prompt/system-prompt.js";
+import { buildSystemPrompt, detectEnvironment } from "../prompt/builder.js";
+import {
+  buildPlanModeExitReminder,
+  buildPlanModeReentryReminder,
+  getPlanPath,
+  planFileExists,
+} from "../prompt/plan-mode.js";
+import type { EnvironmentContext } from "../prompt/sections.js";
+import { PermissionChecker, type AgentMode } from "../permissions/checker.js";
 import { BashTool } from "../tools/bash.js";
 import { EditFileTool } from "../tools/edit-file.js";
 import { GlobTool } from "../tools/glob.js";
@@ -27,12 +35,45 @@ export interface AppProps {
   providers: readonly ProviderConfig[];
   workDir?: string;
   requestTimeoutMs?: number;
+  runtimeFactory?: RuntimeFactory;
+}
+
+export interface AgentRuntime {
+  provider: Provider;
+  systemPrompt: string;
+}
+
+export type RuntimeFactory = (
+  config: ProviderConfig,
+  workDir: string,
+) => Promise<AgentRuntime>;
+
+type ProviderFactory = (config: ProviderConfig) => Promise<Provider>;
+type EnvironmentDetector = (workDir: string) => Promise<EnvironmentContext>;
+
+export async function initializeAgentRuntime(
+  config: ProviderConfig,
+  workDir: string,
+  providerFactory: ProviderFactory = createProvider,
+  environmentDetector: EnvironmentDetector = detectEnvironment,
+): Promise<AgentRuntime> {
+  const [provider, detectedEnvironment] = await Promise.all([
+    providerFactory(config),
+    environmentDetector(workDir),
+  ]);
+  const environment = { ...detectedEnvironment, model: config.model };
+
+  return {
+    provider,
+    systemPrompt: buildSystemPrompt(environment),
+  };
 }
 
 export function App({
   providers,
   workDir = process.cwd(),
   requestTimeoutMs = 120_000,
+  runtimeFactory = initializeAgentRuntime,
 }: AppProps) {
   const { exit } = useApp();
   const [selectedConfig, setSelectedConfig] = useState<ProviderConfig | undefined>(
@@ -44,12 +85,13 @@ export function App({
   const [status, setStatus] = useState<TurnStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [exitHint, setExitHint] = useState("");
+  const [mode, setMode] = useState<AgentMode>("default");
   const [inputTokens, setInputTokens] = useState<number>();
   const [outputTokens, setOutputTokens] = useState<number>();
   const [iteration, setIteration] = useState<number>();
   const [startedAt, setStartedAt] = useState(Date.now());
   const conversationRef = useRef(new Conversation());
-  const providerRef = useRef<Provider | undefined>(undefined);
+  const runtimeRef = useRef<Promise<AgentRuntime> | undefined>(undefined);
   const abortRef = useRef<AbortController | undefined>(undefined);
   const lastCtrlCRef = useRef(0);
   const exitHintTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -59,6 +101,12 @@ export function App({
     abortRef.current?.abort();
     if (exitHintTimerRef.current) clearTimeout(exitHintTimerRef.current);
   }, []);
+
+  useEffect(() => {
+    runtimeRef.current = selectedConfig
+      ? startRuntime(runtimeFactory, selectedConfig, workDir)
+      : undefined;
+  }, [runtimeFactory, selectedConfig, workDir]);
 
   useInput((input, key) => {
     if (key.escape && busy) {
@@ -107,6 +155,29 @@ export function App({
       return;
     }
 
+    const command = rawText.trim();
+    const planPath = getPlanPath(workDir);
+    if (command === "/plan") {
+      if (mode === "plan") return;
+      const reminder = buildPlanModeReentryReminder(
+        planPath,
+        planFileExists(planPath),
+      );
+      if (reminder) conversationRef.current.addSystemReminder(reminder);
+      setMessages(conversationRef.current.getMessages());
+      setMode("plan");
+      return;
+    }
+    if (command === "/do") {
+      if (mode === "default") return;
+      conversationRef.current.addSystemReminder(
+        buildPlanModeExitReminder(planPath, planFileExists(planPath)),
+      );
+      setMessages(conversationRef.current.getMessages());
+      setMode("default");
+      return;
+    }
+
     conversationRef.current.addUserMessage(rawText);
     setMessages(conversationRef.current.getMessages());
     setStreamingText("");
@@ -127,16 +198,19 @@ export function App({
     }, requestTimeoutMs);
     let agentFailed = false;
     try {
-      const provider = providerRef.current ?? await createProvider(config);
-      providerRef.current = provider;
+      const runtimePromise = runtimeRef.current
+        ?? startRuntime(runtimeFactory, config, workDir);
+      runtimeRef.current = runtimePromise;
+      const runtime = await runtimePromise;
       const registry = createToolRegistry();
       const agent = new Agent({
-        provider,
+        provider: runtime.provider,
         registry,
         conversation: conversationRef.current,
-        systemPrompt: buildSystemPrompt(workDir),
+        systemPrompt: runtime.systemPrompt,
         workDir,
         abortSignal: controller.signal,
+        permissionChecker: new PermissionChecker(mode),
       });
 
       for await (const event of agent.run()) {
@@ -207,13 +281,23 @@ export function App({
       <Box marginTop={1} flexDirection="column">
         <InputBox disabled={busy} onSubmit={(value) => void submit(value)} />
         <StatusBar
-          mode={"default"}
+          mode={mode}
           {...(inputTokens === undefined ? {} : { inputTokens })}
           {...(outputTokens === undefined ? {} : { outputTokens })}
         />
       </Box>
     </Box>
   );
+}
+
+function startRuntime(
+  runtimeFactory: RuntimeFactory,
+  config: ProviderConfig,
+  workDir: string,
+): Promise<AgentRuntime> {
+  const runtime = runtimeFactory(config, workDir);
+  void runtime.catch(() => {});
+  return runtime;
 }
 
 function createToolRegistry(): ToolRegistry {

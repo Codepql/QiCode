@@ -8,6 +8,7 @@ export interface ToolResult {
 export interface ToolContext {
   workDir: string;
   abortSignal?: AbortSignal;
+  readFiles?: Set<string>;
 }
 
 export interface Tool {

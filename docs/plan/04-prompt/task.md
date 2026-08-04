@@ -1,6 +1,6 @@
 # QiCode 第04阶段任务清单：系统提示工程化
 
-> 状态：开发中。T1、T2 已完成，等待下一阶段稳定提示词接线。
+> 状态：开发中。T1、T2 与第 3 次拆分的稳定提示词接线已完成，等待 Plan Mode reminder 通道。
 >
 > 前置章节：01-LLM、02-Tools、03-Agent Loop。所有命令使用 pnpm；开发运行 `pnpm dev`，聚焦测试使用 `pnpm test -- <path>`，类型检查 `pnpm typecheck`，构建 `pnpm build`。
 >
@@ -47,9 +47,9 @@
 3. 定义 `export interface EnvironmentContext { workDir; os; arch; shell; isGitRepo; gitBranch; model; date }`。
 4. 实现 `environmentSection(env)` priority=70:输出 `# 环境` 段,固定行 workDir / `${os}/${arch}` / shell / isGitRepo / date;条件行 gitBranch(`env.isGitRepo && env.gitBranch`)、model(非空)。
 
-**实际实现:** 已定义 `Section`、`EnvironmentContext`、八个固定 Section 工厂；旧版 `buildSystemPrompt()` 改为读取 Section 的 `content`，保证进入 T2 前现有调用链仍可用。
+**实际实现:** 已定义 `Section`、`EnvironmentContext`、八个固定 Section 工厂；第 3 次拆分完成后，旧 `system-prompt.ts` 已删除，统一由 `builder.ts` 提供系统提示入口。
 
-**验证:** 已新增聚焦用例覆盖 Section 名称、优先级和环境可选行；按用户要求本阶段不运行自动化测试，仅执行类型检查。
+**验证:** `tests/prompt/sections.test.ts` 已覆盖八个 Section 的名称与优先级、环境固定字段、Git/model 可选字段的出现与省略；2026-08-03 聚焦测试和类型检查通过。
 
 ## T2: PromptBuilder 与 buildSystemPrompt（已完成）
 
@@ -70,9 +70,9 @@
    - `opts.memorySection` → `b.add({ name:"Memory", priority:100, content: opts.memorySection })`。
    - return b.build()。
 
-**实际实现:** `PromptBuilder` 已支持链式挂载、按优先级稳定组装、trim 与跳空；`detectEnvironment()` 已采集基础运行信息并对 Git 失败降级；`buildSystemPrompt()` 已挂载八个固定模块及三个可选槽位。本阶段按拆分计划暂不接入 TUI，调用点将在下一阶段统一改造。
+**实际实现:** `PromptBuilder` 已支持链式挂载、按优先级稳定组装、trim 与跳空；`detectEnvironment()` 已采集基础运行信息并对 Git 失败降级；`buildSystemPrompt()` 已挂载八个固定模块及三个可选槽位。第 3 次拆分已通过 `initializeAgentRuntime()` 接入 TUI 运行链。
 
-**验证:** 已新增聚焦测试覆盖排序、跳空、稳定输出、可选模块和环境降级；按用户要求不运行自动化测试，仅执行类型检查。
+**验证:** `tests/prompt/builder.test.ts` 已覆盖优先级排序、trim/跳空、八段完整装配、F5 工具规则、稳定输出、可选模块顺序和真实非 Git 临时目录降级；2026-08-03 聚焦测试和类型检查通过。
 
 ## T3: 规划模式 reminder 构造器**文件:** `src/prompt/plan-mode.ts`
 **依赖:** 无
@@ -149,6 +149,8 @@
 
 ## T9: TUI 与 spawn / teammate 接线**文件:** `src/tui/app.tsx`、`src/agents/spawn.ts`、`src/teammate.ts`
 **依赖:** T2、T3、T4
+
+**第 3 次拆分实际实现:** 当前仓库真实存在的 TUI 稳定提示词接线已完成：`initializeAgentRuntime()` 并行创建 Provider 与探测环境、写入所选模型并构建 system prompt；`App` 缓存同一 runtime，跨用户轮次复用同一提示文本。Plan Mode 切换属于第 4 次拆分；当前不存在的 spawn/teammate 不在本次创建。
 **步骤:**
 1. `src/tui/app.tsx`:`initClient` 中 `const env = detectEnvironment(workDir); env.model = provider.model; const systemPrompt = buildSystemPrompt(env); const client = await createProvider(provider, systemPrompt); providerRef.current = client;`。
 2. `/plan` 进入路径:在已有 plan 文件存在时 `convRef.current.addSystemReminder(buildPlanModeReentryReminder(planPath, true))`。
