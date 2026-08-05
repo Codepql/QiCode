@@ -6,6 +6,7 @@ coverage/
 
 .QiCode/config.yaml
 .QiCode/config.local.yaml
+.QiCode/permissions.local.yaml
 config.local.yaml
 .env
 .env.*

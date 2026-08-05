@@ -6,6 +6,7 @@ import { ChatView } from "../../src/tui/chat-view.js";
 import { Activity } from "../../src/tui/activity.js";
 import { Header } from "../../src/tui/header.js";
 import { InputBox } from "../../src/tui/input-box.js";
+import { PermissionDialog } from "../../src/tui/permission-dialog.js";
 import { sanitizeTerminalText } from "../../src/tui/sanitize-terminal.js";
 import { StatusBar } from "../../src/tui/status-bar.js";
 
@@ -79,5 +80,48 @@ describe("TUI layout", () => {
     expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(19);
     expect(view.lastFrame()).toContain(">");
     expect(view.lastFrame()).not.toMatch(/[╭╮╰╯─]/);
+  });
+
+  it("shows the active permission mode badge", () => {
+    const view = render(
+      <InputBox permMode="acceptEdits" onSubmit={() => {}} />,
+    );
+    expect(view.lastFrame()).toContain("Accept Edits on");
+    expect(view.lastFrame()).toContain("shift+tab to cycle");
+    view.unmount();
+  });
+
+  it("supports HITL keyboard selection and escape denial", async () => {
+    const actions: string[] = [];
+    const view = render(
+      <PermissionDialog
+        toolName="WriteFile"
+        argsSummary="a.txt"
+        reason="Mode: default"
+        onComplete={(action) => actions.push(action)}
+      />,
+    );
+
+    expect(view.lastFrame()).toContain("This command requires approval");
+    view.stdin.write("\u001b[B");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    view.stdin.write("\r");
+    expect(actions).toEqual(["allowAlways"]);
+    view.unmount();
+
+    const denyView = render(
+      <PermissionDialog
+        toolName="WriteFile"
+        argsSummary="a.txt"
+        reason="Mode: default"
+        onComplete={(action) => actions.push(action)}
+      />,
+    );
+    denyView.stdin.write("\u001b[B");
+    denyView.stdin.write("\u001b[B");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    denyView.stdin.write("\r");
+    expect(actions).toEqual(["allowAlways", "deny"]);
+    denyView.unmount();
   });
 });

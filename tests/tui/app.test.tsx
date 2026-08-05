@@ -80,6 +80,15 @@ describe("App", () => {
     ]);
     view.unmount();
   });
+
+  it("renders the active permission mode in the input area", () => {
+    const view = render(
+      <App providers={[providerConfig]} workDir="/workspace" />,
+    );
+
+    expect(view.lastFrame()).toContain("default");
+    view.unmount();
+  });
 });
 
 function fakeProvider(requests: ChatRequest[]): Provider {

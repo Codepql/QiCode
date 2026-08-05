@@ -1,4 +1,4 @@
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { Agent } from "../agent/agent.js";
 import type { ProviderConfig } from "../config/types.js";
@@ -13,7 +13,7 @@ import {
   planFileExists,
 } from "../prompt/plan-mode.js";
 import type { EnvironmentContext } from "../prompt/sections.js";
-import { PermissionChecker, type AgentMode } from "../permissions/checker.js";
+import { PermissionChecker, type PermissionMode } from "../permissions/checker.js";
 import { BashTool } from "../tools/bash.js";
 import { EditFileTool } from "../tools/edit-file.js";
 import { GlobTool } from "../tools/glob.js";
@@ -26,8 +26,10 @@ import { Activity } from "./activity.js";
 import { ChatView, type ActiveTool } from "./chat-view.js";
 import { Header } from "./header.js";
 import { InputBox } from "./input-box.js";
+import { PermissionDialog, type PermissionAction } from "./permission-dialog.js";
 import { ProviderSelect } from "./provider-select.js";
 import { StatusBar } from "./status-bar.js";
+import { formatArgs } from "./tool-display.js";
 
 type TurnStatus = "idle" | "waiting" | "streaming" | "failed";
 
@@ -76,6 +78,7 @@ export function App({
   runtimeFactory = initializeAgentRuntime,
 }: AppProps) {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const [selectedConfig, setSelectedConfig] = useState<ProviderConfig | undefined>(
     providers.length === 1 ? providers[0] : undefined,
   );
@@ -85,7 +88,13 @@ export function App({
   const [status, setStatus] = useState<TurnStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [exitHint, setExitHint] = useState("");
-  const [mode, setMode] = useState<AgentMode>("default");
+  const [mode, setMode] = useState<PermissionMode>("default");
+  const [permissionRequest, setPermissionRequest] = useState<{
+    toolName: string;
+    argsSummary: string;
+    reason: string;
+  } | null>(null);
+  const permissionResolveRef = useRef<((action: PermissionAction) => void) | null>(null);
   const [inputTokens, setInputTokens] = useState<number>();
   const [outputTokens, setOutputTokens] = useState<number>();
   const [iteration, setIteration] = useState<number>();
@@ -96,6 +105,12 @@ export function App({
   const lastCtrlCRef = useRef(0);
   const exitHintTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const busy = status === "waiting" || status === "streaming";
+  const chatChromeRows =
+    8 +
+    (errorMessage !== "" ? 1 : 0) +
+    (exitHint !== "" ? 1 : 0) +
+    (permissionRequest !== null ? 8 : 0);
+  const chatMaxHeight = Math.max(4, (stdout.rows ?? 24) - chatChromeRows);
 
   useEffect(() => () => {
     abortRef.current?.abort();
@@ -108,8 +123,25 @@ export function App({
       : undefined;
   }, [runtimeFactory, selectedConfig, workDir]);
 
+  // Shift+Tab 循环切换权限模式（原始 \x1b[Z 序列；只在此处监听，避免双重触发切两档）。
+  useEffect(() => {
+    const cycle: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
+    const handler = (data: Buffer): void => {
+      if (data.toString() === "\x1b[Z") {
+        setMode((previous) => {
+          const index = cycle.indexOf(previous);
+          return cycle[(index + 1) % cycle.length]!;
+        });
+      }
+    };
+    process.stdin.on("data", handler);
+    return () => {
+      process.stdin.off("data", handler);
+    };
+  }, []);
+
   useInput((input, key) => {
-    if (key.escape && busy) {
+    if (key.escape && busy && permissionRequest === null) {
       abortRef.current?.abort();
       setExitHint("Cancelling current task...");
       return;
@@ -177,6 +209,24 @@ export function App({
       setMode("default");
       return;
     }
+    if (command.startsWith("/permission")) {
+      const modes: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
+      const parts = command.slice("/permission".length).trim().split(/\s+/).filter(Boolean);
+      if (parts[0] === "mode" && parts[1] !== undefined && (modes as string[]).includes(parts[1])) {
+        setMode(parts[1] as PermissionMode);
+        conversationRef.current.addSystemReminder(`Permission mode \u2192 ${parts[1]}`);
+      } else if (parts[0] === "mode" && parts[1] !== undefined) {
+        conversationRef.current.addSystemReminder(
+          `Unknown mode '${parts[1]}'. Valid: ${modes.join(", ")}`,
+        );
+      } else {
+        conversationRef.current.addSystemReminder(
+          `Permission mode: ${mode}\nChange with shift+tab, or /permission mode <${modes.join("|")}>`,
+        );
+      }
+      setMessages(conversationRef.current.getMessages());
+      return;
+    }
 
     conversationRef.current.addUserMessage(rawText);
     setMessages(conversationRef.current.getMessages());
@@ -210,7 +260,31 @@ export function App({
         systemPrompt: runtime.systemPrompt,
         workDir,
         abortSignal: controller.signal,
-        permissionChecker: new PermissionChecker(mode),
+        checker: new PermissionChecker(workDir, mode),
+        onPermissionRequest: async (toolName, args, decision) => {
+          return new Promise<PermissionAction>((resolve) => {
+            let settled = false;
+            const onAbort = (): void => finish("deny");
+            const finish = (action: PermissionAction): void => {
+              if (settled) return;
+              settled = true;
+              controller.signal.removeEventListener("abort", onAbort);
+              if (permissionResolveRef.current === finish) {
+                permissionResolveRef.current = null;
+                setPermissionRequest(null);
+              }
+              resolve(action);
+            };
+
+            controller.signal.addEventListener("abort", onAbort, { once: true });
+            permissionResolveRef.current = finish;
+            setPermissionRequest({
+              toolName,
+              argsSummary: formatArgs(args),
+              reason: decision.reason,
+            });
+          });
+        },
       });
 
       for await (const event of agent.run()) {
@@ -223,6 +297,7 @@ export function App({
         } else if (event.type === "thinking_text") {
           setStatus("streaming");
         } else if (event.type === "tool_use") {
+          setStreamingText("");
           setActiveTools((current) => [...current, {
             toolId: event.toolId,
             toolName: event.toolName,
@@ -270,7 +345,7 @@ export function App({
   return (
     <Box flexDirection="column">
       <Header version={VERSION} model={selectedConfig.model} workDir={workDir} />
-      <ChatView messages={messages} streamingText={streamingText} activeTools={activeTools} />
+      <ChatView messages={messages} streamingText={streamingText} activeTools={activeTools} maxHeight={chatMaxHeight} />
       <Activity
         active={busy}
         label={status === "waiting" ? "Waiting" : iteration === undefined ? "Thinking" : `Iteration ${iteration}`}
@@ -278,8 +353,24 @@ export function App({
       />
       {errorMessage && <Text color="red">Error: {errorMessage}</Text>}
       {exitHint && <Text color="yellow">{exitHint}</Text>}
+      {permissionRequest && (
+        <PermissionDialog
+          toolName={permissionRequest.toolName}
+          argsSummary={permissionRequest.argsSummary}
+          reason={permissionRequest.reason}
+          onComplete={(action) => {
+            permissionResolveRef.current?.(action);
+            permissionResolveRef.current = null;
+            setPermissionRequest(null);
+          }}
+        />
+      )}
       <Box marginTop={1} flexDirection="column">
-        <InputBox disabled={busy} onSubmit={(value) => void submit(value)} />
+        <InputBox
+          disabled={busy || permissionRequest !== null}
+          permMode={mode}
+          onSubmit={(value) => void submit(value)}
+        />
         <StatusBar
           mode={mode}
           {...(inputTokens === undefined ? {} : { inputTokens })}

@@ -53,7 +53,7 @@ describe("AnthropicProvider", () => {
       ] }],
     });
     expect(events).toEqual([
-      { type: "usage", inputTokens: 7 },
+      { type: "usage", inputTokens: 7, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
       { type: "thinking_delta", thinking: "reason" },
       { type: "thinking_complete", thinking: "reason", signature: "sig" },
       { type: "text_delta", text: "answer" },
@@ -112,7 +112,7 @@ describe("AnthropicProvider", () => {
     const events = await collect(provider.stream({ systemPrompt: "system", messages: [] }));
 
     expect(events).toEqual([
-      { type: "usage", inputTokens: 2 },
+      { type: "usage", inputTokens: 2, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
       { type: "text_delta", text: "partial" },
       { type: "done" },
     ]);

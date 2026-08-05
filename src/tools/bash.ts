@@ -5,6 +5,57 @@ import { intArg, strArg, type Tool, type ToolContext, type ToolResult } from "./
 const MAX_TIMEOUT_SECONDS = 600;
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 
+// Windows 控制台代码页 -> TextDecoder 标签（中文系统常见 936/GBK）。
+const CODEPAGE_LABELS: Record<number, string> = {
+  437: "ibm437",
+  850: "ibm850",
+  852: "ibm852",
+  866: "ibm866",
+  932: "shift_jis",
+  936: "gbk",
+  949: "euc-kr",
+  950: "big5",
+  1250: "windows-1250",
+  1251: "windows-1251",
+  1252: "windows-1252",
+  1253: "windows-1253",
+  1254: "windows-1254",
+  65001: "utf-8",
+};
+
+let outputEncodingLabel: string | undefined;
+
+function detectOutputEncodingLabel(): string {
+  if (outputEncodingLabel !== undefined) return outputEncodingLabel;
+  let label = "utf-8";
+  if (process.platform === "win32") {
+    try {
+      const result = spawnSync("chcp", [], {
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+        encoding: "utf8",
+      });
+      const match = /(\d+)/.exec(result.stdout ?? "");
+      if (match !== null) label = CODEPAGE_LABELS[Number(match[1])] ?? "utf-8";
+    } catch {
+      // 检测失败时保持 utf-8
+    }
+  }
+  outputEncodingLabel = label;
+  return label;
+}
+
+/**
+ * 解码子进程输出：优先按 UTF-8 解码，若出现替换符（U+FFFD）则回退到
+ * Windows 控制台代码页（如 GBK），解决中文 Windows 下 cmd/PowerShell 输出乱码。
+ */
+export function decodeChildOutput(bytes: Buffer): string {
+  if (bytes.length === 0) return "";
+  const utf8 = new TextDecoder("utf-8").decode(bytes);
+  if (!utf8.includes("\uFFFD")) return utf8;
+  return new TextDecoder(detectOutputEncodingLabel()).decode(bytes);
+}
+
 const NON_ERROR_EXIT_THRESHOLDS = new Map([
   ["grep", 2],
   ["egrep", 2],
@@ -60,8 +111,8 @@ export class BashTool implements Tool {
       : "/bin/sh";
 
     return new Promise((resolve) => {
-      let stdout = "";
-      let stderr = "";
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
       let outputBytes = 0;
       let timedOut = false;
       let aborted = false;
@@ -107,8 +158,8 @@ export class BashTool implements Tool {
           terminate();
           return;
         }
-        if (target === "stdout") stdout += chunk.toString("utf8");
-        else stderr += chunk.toString("utf8");
+        if (target === "stdout") stdoutChunks.push(chunk);
+        else stderrChunks.push(chunk);
       };
 
       const abort = (): void => {
@@ -145,6 +196,8 @@ export class BashTool implements Tool {
           return;
         }
 
+        const stdout = decodeChildOutput(Buffer.concat(stdoutChunks));
+        const stderr = decodeChildOutput(Buffer.concat(stderrChunks));
         const output = [
           `$ ${command}`,
           stdout,

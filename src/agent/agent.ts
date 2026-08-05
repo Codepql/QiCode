@@ -12,7 +12,10 @@ import {
   getPlanPath,
   planFileExists,
 } from "../prompt/plan-mode.js";
-import { PermissionChecker } from "../permissions/checker.js";
+import {
+  PermissionChecker,
+  type Decision,
+} from "../permissions/checker.js";
 import { ToolRegistry } from "../tools/registry.js";
 import type { ToolCategory } from "../tools/types.js";
 import { StreamingExecutor } from "./streaming-executor.js";
@@ -31,17 +34,27 @@ export interface AgentConfig {
   workDir: string;
   abortSignal?: AbortSignal;
   maxIterations?: number;
-  permissionChecker?: PermissionChecker;
+  checker: PermissionChecker;
+  onPermissionRequest?: (
+    toolName: string,
+    args: Record<string, unknown>,
+    decision: Decision,
+  ) => Promise<"allow" | "deny" | "allowAlways">;
 }
 
 export class Agent {
   readonly #readFiles = new Set<string>();
+  readonly #checker: PermissionChecker;
+  readonly #onPermissionRequest: AgentConfig["onPermissionRequest"];
 
-  constructor(private readonly config: AgentConfig) {}
+  constructor(private readonly config: AgentConfig) {
+    this.#checker = config.checker;
+    this.#onPermissionRequest = config.onPermissionRequest;
+  }
 
   async *run(): AsyncGenerator<AgentEvent> {
     const maxIterations = this.config.maxIterations ?? DEFAULT_MAX_ITERATIONS;
-    const permissionChecker = this.config.permissionChecker ?? new PermissionChecker();
+    const checker = this.#checker;
     let consecutiveUnknownToolTurns = 0;
 
     for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
@@ -51,7 +64,7 @@ export class Agent {
       }
 
       yield { type: "iteration_start", iteration };
-      if (permissionChecker.mode === "plan") {
+      if (checker.mode === "plan") {
         const planPath = getPlanPath(this.config.workDir);
         this.config.conversation.addSystemReminder(
           buildPlanModeReminder(
@@ -62,7 +75,7 @@ export class Agent {
         );
       }
       const response = createCollectedResponse();
-      const tools = toolDefinitions(this.config.registry, permissionChecker);
+      const tools = toolDefinitions(this.config.registry, checker);
       const streamCompleted = yield* this.streamResponse(response, tools);
 
       if (!streamCompleted || this.config.abortSignal?.aborted) {
@@ -90,7 +103,7 @@ export class Agent {
         ? consecutiveUnknownToolTurns + 1
         : 0;
 
-      yield* this.executeTools(response.toolUses, permissionChecker);
+      yield* this.executeTools(response.toolUses, checker);
       yield { type: "turn_complete" };
 
       if (consecutiveUnknownToolTurns >= MAX_CONSECUTIVE_UNKNOWN_TOOL_TURNS) {
@@ -183,12 +196,12 @@ export class Agent {
 
   private async *executeTools(
     toolUses: readonly ToolUseBlock[],
-    permissionChecker: PermissionChecker,
+    checker: PermissionChecker,
   ): AsyncGenerator<AgentEvent> {
     const results: ToolExecution[] = [];
 
     for (const batch of createExecutionBatches(toolUses, this.config.registry)) {
-      const batchResults = await this.executeBatch(batch, permissionChecker);
+      const batchResults = await this.executeBatch(batch, checker);
       results.push(...batchResults);
     }
 
@@ -214,32 +227,80 @@ export class Agent {
 
   private async executeBatch(
     toolUses: readonly ToolUseBlock[],
-    permissionChecker: PermissionChecker,
+    checker: PermissionChecker,
   ): Promise<ToolExecution[]> {
     const executor = new StreamingExecutor(this.config.registry, {
       workDir: this.config.workDir,
       readFiles: this.#readFiles,
       ...(this.config.abortSignal === undefined ? {} : { abortSignal: this.config.abortSignal }),
     });
-    const blocked: ToolExecution[] = [];
+    const executions = new Map<string, ToolExecution>();
+
     for (const toolUse of toolUses) {
       const category = toolCategory(this.config.registry, toolUse.name);
-      if (!permissionChecker.allows(category)) {
-        blocked.push({
+      const decision = checker.check(toolUse.name, category, toolUse.input);
+
+      if (decision.effect === "deny") {
+        executions.set(toolUse.id, {
           toolId: toolUse.id,
           toolName: toolUse.name,
           result: {
-            output: `Plan mode does not allow ${category} tools.`,
+            output: `Permission denied: ${decision.reason}. 此操作已被安全策略拦截和阻止，请告知用户该命令被拒绝，不要描述该命令会做什么。`,
             isError: true,
           },
           elapsed: 0,
         });
-      } else {
-        executor.submit(toolUse.id, toolUse.name, toolUse.input);
+        continue;
       }
+
+      if (decision.effect === "ask") {
+        if (this.#onPermissionRequest === undefined) {
+          // 没有审批回调：安全默认 = 拒绝，绝不静默执行。
+          executions.set(toolUse.id, {
+            toolId: toolUse.id,
+            toolName: toolUse.name,
+            result: {
+              output: `Permission denied: ${decision.reason}. 此操作已被安全策略拦截和阻止，请告知用户该命令被拒绝，不要描述该命令会做什么。`,
+              isError: true,
+            },
+            elapsed: 0,
+          });
+          continue;
+        }
+        const response = await this.#onPermissionRequest(
+          toolUse.name,
+          toolUse.input,
+          decision,
+        );
+        if (response === "deny") {
+          executions.set(toolUse.id, {
+            toolId: toolUse.id,
+            toolName: toolUse.name,
+            result: { output: "Permission denied by user", isError: true },
+            elapsed: 0,
+          });
+          continue;
+        }
+        if (response === "allowAlways") {
+          checker.allowAlways(toolUse.name, toolUse.input);
+        }
+        // allow / allowAlways 都落到正常执行路径
+      }
+
+      executor.submit(toolUse.id, toolUse.name, toolUse.input);
     }
 
-    return [...await executor.collectResults(), ...blocked];
+    for (const executed of await executor.collectResults()) {
+      executions.set(executed.toolId, executed);
+    }
+
+    // 按原始调用序回灌，工具调用与结果按 toolUseId 正确配对。
+    const results: ToolExecution[] = [];
+    for (const toolUse of toolUses) {
+      const execution = executions.get(toolUse.id);
+      if (execution !== undefined) results.push(execution);
+    }
+    return results;
   }
 
   private commitAssistant(response: CollectedResponse, includeToolUses = true): void {
@@ -270,9 +331,9 @@ function createCollectedResponse(): CollectedResponse {
 
 function toolDefinitions(
   registry: ToolRegistry,
-  permissionChecker: PermissionChecker,
+  checker: PermissionChecker,
 ): ToolDefinition[] {
-  return registry.listTools().filter((tool) => permissionChecker.allows(tool.category)).map((tool) => {
+  return registry.listTools().filter((tool) => checker.allows(tool.category)).map((tool) => {
     const schema = tool.schema();
     const inputSchema = schema["input_schema"];
     return {

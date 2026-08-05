@@ -131,7 +131,7 @@ describe("Agent", () => {
       registry,
       conversation,
       undefined,
-      new PermissionChecker("plan"),
+      new PermissionChecker(process.cwd(), "plan"),
     ));
 
     expect(calls).toEqual([]);
@@ -139,11 +139,11 @@ describe("Agent", () => {
       type: "tool_result",
       toolId: "write",
       toolName: "WriteOne",
-      output: "Plan mode does not allow write tools.",
+      output: "Permission denied: Mode: plan. 此操作已被安全策略拦截和阻止，请告知用户该命令被拒绝，不要描述该命令会做什么。",
       isError: true,
       elapsed: 0,
     });
-    expect(Conversation.visibleText(provider.requests[0]!.messages.at(-1)!)).toContain("Plan mode is active.");
+    expect(Conversation.visibleText(provider.requests[0]!.messages.at(-1)!)).toContain("计划模式已激活");
     expect(provider.requests[0]!.tools).toBeUndefined();
   });
 });
@@ -190,7 +190,7 @@ function agent(
   registry: ToolRegistry,
   conversation: Conversation,
   maxIterations?: number,
-  permissionChecker?: PermissionChecker,
+  checker?: PermissionChecker,
 ): AsyncIterable<AgentEvent> {
   return new Agent({
     provider,
@@ -199,7 +199,8 @@ function agent(
     systemPrompt: "system",
     workDir: process.cwd(),
     ...(maxIterations === undefined ? {} : { maxIterations }),
-    ...(permissionChecker === undefined ? {} : { permissionChecker }),
+    // 默认 bypassPermissions：既有"测试时不走 HITL"的预期不变。
+    checker: checker ?? new PermissionChecker(process.cwd(), "bypassPermissions"),
   }).run();
 }
 

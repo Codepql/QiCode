@@ -236,7 +236,7 @@ const permissionResolveRef = useRef<
 
 ### `src/tui/input.tsx` / `src/tui/status-bar.tsx`
 
-- `input.tsx` 顶部 `modeDisplay: Record<string, {name, color}>`：`default→{name:"default",color:"gray"}`、`acceptEdits→{name:"Accept Edits",color:"green"}`、`plan→{name:"Plan",color:"yellow"}`、`bypassPermissions→{name:"YOLO",color:"red"}`。
+- `input.tsx` 顶部 `modeDisplay: Record<string, {name, color}>`：`default→{name:"default",color:"gray"}`、`acceptEdits→{name:"Accept Edits",color:"green"}`、`plan→{name:"Plan",color:"yellow"}`、`bypassPermissions→{name:"manual",color:"red"}`。
 - `input.tsx` 渲染：`permMode !== "default"` 时显示 `<Text color>Accept Edits on</Text><Text dimColor>(shift+tab to cycle)</Text>` 类信息行。
 - `status-bar.tsx` 底部 `mode` + token 计数：`{ symbols.dot } default · 12.3K↓ 4.5K↑` 风格。
 
