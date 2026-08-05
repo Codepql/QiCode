@@ -85,6 +85,22 @@ describe("Conversation", () => {
     ]);
   });
 
+  it("adds system reminders as a protected user message", () => {
+    const conversation = new Conversation();
+
+    conversation.addSystemReminder("Plan mode is active. Only inspect files.");
+
+    expect(conversation.getMessages()).toEqual([
+      {
+        role: "user",
+        content: [{
+          type: "text",
+          text: "<system-reminder>\nPlan mode is active. Only inspect files.\n</system-reminder>",
+        }],
+      },
+    ]);
+  });
+
   it("does not expose mutable tool inputs or results", () => {
     const conversation = new Conversation();
     const toolUse: ToolUseBlock = {

@@ -24,10 +24,10 @@
 | 新建 | `src/agent/events.ts` | `AgentEvent` 联合类型 |
 | 新建 | `src/agent/streaming-executor.ts` | `StreamingExecutor.submit` / `collectResults` |
 | 新建 | `src/agent/agent.ts` | `Agent.run()` AsyncGenerator（单轮闭环） |
-| 修改 | `src/providers/types.ts` | `StreamEvent` 增 `tool_call_start` / `tool_call_delta` / `tool_call_complete` / `thinking_delta` / `thinking_complete` |
-| 修改 | `src/providers/types.ts` | `ChatRequest` 增加 `tools?: ToolDefinition[]`；`StreamEvent` 增加工具调用事件 |
-| 修改 | `src/providers/anthropic.ts` | 注入 `params.tools`、流式解析 `tool_use` / `thinking`、`buildAnthropicMessages` 支持 `tool_use` / `tool_result` |
-| 修改 | `src/providers/openai.ts` | OpenAI Chat Completions 工具调用解析与历史回灌 |
+| 修改 | `src/llm/events.ts` | `StreamEvent` 增 `tool_call_start` / `tool_call_delta` / `tool_call_complete` / `thinking_delta` / `thinking_complete` |
+| 修改 | `src/llm/events.ts` | `ChatRequest` 增加 `tools?: ToolDefinition[]`；`StreamEvent` 增加工具调用事件 |
+| 修改 | `src/llm/anthropic.ts` | 注入 `params.tools`、流式解析 `tool_use` / `thinking`、`buildAnthropicMessages` 支持 `tool_use` / `tool_result` |
+| 修改 | `src/llm/openai.ts` | OpenAI Chat Completions 工具调用解析与历史回灌 |
 | 修改 | `src/conversation/conversation.ts` | `ConversationBlock` 保存 thinking / tool use / tool result；`addAssistantMessage` / `addToolResultsMessage` |
 | 修改 | `src/prompt/sections.ts` | `usingToolsSection` / `executingActionsSection` |
 | 新建 | `src/tui/tool-display.tsx` | `ToolDisplay` / `ToolBlock` / `formatArgs` |
@@ -184,11 +184,11 @@
 
 ## T10: 三个 LLM 类型扩展
 
-**文件：** `src/providers/types.ts`、`src/providers/types.ts` / `src/providers/create-provider.ts`、`src/conversation/conversation.ts`
+**文件：** `src/llm/events.ts`、`src/llm/events.ts` / `src/llm/client.ts`、`src/conversation/conversation.ts`
 **依赖：** 无
 **步骤：**
-1. `src/providers/types.ts`：扩展 `StreamEvent` 联合类型，加入 `thinking_delta` / `thinking_complete` / `tool_call_start` / `tool_call_delta` / `tool_call_complete` 共 5 种事件；`UsageInfo` 增 `cacheReadInputTokens` / `cacheCreationInputTokens`。
-2. `src/providers/types.ts`：保持 `Provider.stream(request: ChatRequest)`，为 `ChatRequest` 增加可选 `tools`，为 `StreamEvent` 增加工具调用 start/delta/complete 事件。
+1. `src/llm/events.ts`：扩展 `StreamEvent` 联合类型，加入 `thinking_delta` / `thinking_complete` / `tool_call_start` / `tool_call_delta` / `tool_call_complete` 共 5 种事件；`UsageInfo` 增 `cacheReadInputTokens` / `cacheCreationInputTokens`。
+2. `src/llm/events.ts`：保持 `Provider.stream(request: ChatRequest)`，为 `ChatRequest` 增加可选 `tools`，为 `StreamEvent` 增加工具调用 start/delta/complete 事件。
 3. `src/conversation/conversation.ts`：
    - 导出 `ToolUseBlock { toolUseId, toolName, arguments }`、`ToolResultBlock { toolUseId, content, isError }`、`ThinkingBlock { thinking, signature }`。
    - `Message` 增可选字段 `thinkingBlocks?`、`toolUses?`、`toolResults?`。
@@ -214,7 +214,7 @@
 
 ## T12: Anthropic client 工具支持
 
-**文件：** `src/providers/anthropic.ts`
+**文件：** `src/llm/anthropic.ts`
 **依赖：** T10
 **步骤：**
 1. `stream` 函数签名加 `toolSchemas: Record<string, unknown>[]`。
@@ -235,7 +235,7 @@
 
 ## T13: OpenAI Provider 工具支持
 
-**文件：** `src/providers/openai.ts`
+**文件：** `src/llm/openai.ts`
 **依赖：** T10
 **步骤：**
 1. **OpenAIProvider（Chat Completions API）**：把统一工具 schema 映射为 `tools[].function`，按 `delta.tool_calls[index]` 累积 id、name 和 arguments；finish 后输出统一工具完成事件与 usage。

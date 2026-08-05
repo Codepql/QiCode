@@ -6,7 +6,19 @@
 >
 > 每个行为任务遵循测试先行，并在完成后记录真实实现位置和验证证据。
 
-> 模块路径 `src/agent/*`、`src/providers/*`、`src/tools/*`、`src/conversation/*`、`src/prompt/*`、`src/permissions/*`、`src/tui/*`，运行时 Node.js 22 LTS + TypeScript 5.x。任务有序，每步留绿 `pnpm typecheck`。验证一律「先跑命令看输出，再下结论」。
+> 模块路径 `src/agent/*`、`src/llm/*`、`src/tools/*`、`src/conversation/*`、`src/prompt/*`、`src/permissions/*`、`src/tui/*`，运行时 Node.js 22 LTS + TypeScript 5.x。任务有序，每步留绿 `pnpm typecheck`。验证一律「先跑命令看输出，再下结论」。
+
+## 当前代码校准（2026-07-30）
+
+第 02 章实现已经提前覆盖了原计划的部分公共基础，不能重复开发：
+
+- `src/agent/events.ts` 已存在；第 03 章第 1 次补充了 `iteration_start` 事件。
+- `src/llm/events.ts` 已有工具调用、`usage` 与 `done` 流事件；本章后续只在确有需要时调整，不按旧计划强改成 `stream_end`。
+- `ToolCategory`、六个工具的分类和 `ToolRegistry.getAllSchemas()` 已存在。
+- Conversation 已有 assistant block 与 tool result 历史；第 03 章第 1 次新增 `addSystemReminder()`。
+- 第 03 章第 2 次确认 Provider 已具备 SSE、`usage`、`done`、错误归一化和 `AbortSignal`；补充 Anthropic 在异常缺少 `message_stop` 时仍输出 `done` 的收尾兜底。
+
+因此 T1-T3 在当前项目中属于“已具备的基础 + 最小补齐”，后续开发从 Loop 专属能力继续。每次开始仍以源码为准校准。
 
 ## 文件清单
 
@@ -15,11 +27,11 @@
 | 新增 | `src/agent/events.ts` | `AgentEvent` discriminated union |
 | 新增 | `src/agent/streaming-executor.ts` | `StreamingExecutor` 工具批执行器 |
 | 新增 | `src/agent/agent.ts` | `Agent` 类与 `run()` AsyncGenerator |
-| 修改 | `src/providers/types.ts` | `StreamEvent` 增 `stream_end`、`UsageInfo` 类型 |
-| 修改 | `src/providers/types.ts` / `src/providers/create-provider.ts` | `Provider.stream(conv, tools, abortSignal)` 签名 |
-| 修改 | `src/providers/anthropic.ts` | `AsyncGenerator<StreamEvent>`，`stream_end` 携带 usage |
-| 修改 | `src/providers/openai.ts` | `stream_options.include_usage`，OpenAICompat 同步 |
-| 新增 | `src/providers/errors.ts` | `ContextTooLongError`、`RateLimitError` 等错误类 |
+| 修改 | `src/llm/events.ts` | `StreamEvent` 增 `stream_end`、`UsageInfo` 类型 |
+| 修改 | `src/llm/events.ts` / `src/llm/client.ts` | `Provider.stream(conv, tools, abortSignal)` 签名 |
+| 修改 | `src/llm/anthropic.ts` | `AsyncGenerator<StreamEvent>`，`stream_end` 携带 usage |
+| 修改 | `src/llm/openai.ts` | `stream_options.include_usage`，OpenAICompat 同步 |
+| 新增 | `src/llm/client.ts` | `ContextTooLongError`、`RateLimitError` 等错误类 |
 | 修改 | `src/tools/types.ts` | `Tool` 接口加 `category: ToolCategory` |
 | 修改 | `src/tools/registry.ts` | `getAllSchemas(protocol)` 协议适配 |
 | 修改 | `src/tools/{read-file,glob,grep,write-file,edit-file,bash}.ts` | 各打 `category` |
@@ -29,17 +41,19 @@
 | 修改 | `src/tui/app.tsx` | `useEffect` 消费 `agent.run()`、`useInput` 取消 |
 | 新增 | `src/agent/agent.test.ts` | 多轮 fake client、并发分批、停止条件、Plan 工具集 |
 
-## T1: 定义 `AgentEvent` 与 `UsageInfo`（纯新增，向后兼容）
+## T1: 定义 `AgentEvent` 与 `UsageInfo`（已完成基础校准）
 
-**文件：** `src/agent/events.ts`、`src/providers/types.ts`
+**文件：** `src/agent/events.ts`、`src/llm/events.ts`
 **依赖：** 无
 **步骤：**
-1. `src/providers/types.ts`：新增 `interface UsageInfo { inputTokens; outputTokens; cacheReadInputTokens; cacheCreationInputTokens }`；扩展 `StreamEvent` 联合类型加 `tool_call_start` / `tool_call_delta` / `tool_call_complete` / `stream_end { stopReason, usage }`。
+1. `src/llm/events.ts`：新增 `interface UsageInfo { inputTokens; outputTokens; cacheReadInputTokens; cacheCreationInputTokens }`；扩展 `StreamEvent` 联合类型加 `tool_call_start` / `tool_call_delta` / `tool_call_complete` / `stream_end { stopReason, usage }`。
 2. `src/agent/events.ts`：定义 `AgentEvent` discriminated union（spec 列出的全部 9 个 `type` 分支）。
 
-**验证：** `pnpm typecheck` 通过（纯新增类型）。
+**实际结果：** `AgentEvent` 原已存在；新增 `iteration_start`。Provider 保留已有的可选字段 `usage` 事件，后续再按真实协议调整用量结构。
 
-## T2: 工具 `category` 分类与多协议 schema
+**验证：** `tests/agent/events.test.ts` 通过；`pnpm typecheck` 通过。
+
+## T2: 工具 `category` 分类与多协议 schema（第 02 章已完成）
 
 **文件：** `src/tools/types.ts`、`src/tools/registry.ts`、`src/tools/{read-file,glob,grep,write-file,edit-file,bash}.ts`
 **依赖：** 无
@@ -51,9 +65,11 @@
    - `bash.ts` → `"command"`
 3. `registry.ts`：`getAllSchemas(protocol: "anthropic" | "openai" = "anthropic")`——`"anthropic"` 直返 `tool.schema()`；`"openai"` / `"openai（兼容端点）"` 包装成 `{ type: "function", function: { name, description, parameters: base.input_schema } }`。
 
-**验证：** `pnpm test` 全通过（接口加必填字段后 6 工具均实现，编译即证明完整）；`pnpm typecheck` 通过。
+**实际结果：** 当前六个工具已有分类，`ToolRegistry.getAllSchemas()` 已支持 Anthropic 与 OpenAI 形状；本阶段不重复修改。
 
-## T3: `ConversationManager` 三个新方法
+**验证：** 由既有 `tests/tools/registry.test.ts` 覆盖；`pnpm typecheck` 通过。
+
+## T3: Conversation 的工具历史与系统提醒（已完成基础校准）
 
 **文件：** `src/conversation/conversation.ts`、`src/conversation/conversation.test.ts`（已有）
 **依赖：** 无
@@ -63,7 +79,9 @@
 3. `addSystemReminder(content: string)`：push `{ role: "user", content: \`<system-reminder>\n${content}\n</system-reminder>\` }`。
 4. 测试：每个新方法补 1 条单测——`getMessages()` 返回的最后一条结构正确（含 `toolResults` 数组、`toolUses` 数组、`<system-reminder>` 包裹标签）。
 
-**验证：** `pnpm test -- src/conversation` 通过。
+**实际结果：** 当前类名为 `Conversation`，已有 `addAssistantMessage()` 与 `addToolResultsMessage()`；本阶段新增 `addSystemReminder()`，使用 `system-reminder` 文本块保存计划模式提醒。
+
+**验证：** `tests/conversation/conversation.test.ts` 通过；`pnpm typecheck` 通过。
 
 ## T4: `buildPlanModeReminder` 与 plan 模板
 
@@ -79,13 +97,13 @@
 
 **验证：** `pnpm test -- src/prompt` 通过；`pnpm typecheck` 无错误。
 
-## T5: `Provider.stream()` 签名升级与适配器扩展
+## T5: `Provider.stream()` 签名升级与适配器扩展（已完成基础校准）
 
-**文件：** `src/providers/types.ts` / `src/providers/create-provider.ts`、`src/providers/anthropic.ts`、`src/providers/openai.ts`、`src/providers/errors.ts`
+**文件：** `src/llm/events.ts` / `src/llm/client.ts`、`src/llm/anthropic.ts`、`src/llm/openai.ts`、`src/llm/client.ts`
 **依赖：** T1
 **步骤：**
-1. `src/providers/errors.ts`：导出错误类——`LLMError`（基类）、`AuthenticationError`、`ContextTooLongError`、`RateLimitError`（带 `retryAfter?: string` 字段）、`NetworkError`。
-2. `providers/types.ts`：沿用 `Provider.stream(request)`，确认 `ChatRequest` 同时携带 systemPrompt、messages、tools 与 signal；不新增位置参数或占位副接口。
+1. `src/llm/client.ts`：导出错误类——`LLMError`（基类）、`AuthenticationError`、`ContextTooLongError`、`RateLimitError`（带 `retryAfter?: string` 字段）、`NetworkError`。
+2. `llm/client.ts`：沿用 `Provider.stream(request)`，确认 `ChatRequest` 同时携带 systemPrompt、messages、tools 与 signal；不新增位置参数或占位副接口。
 3. `anthropic.ts`：`async *stream(...)`——
    - 构造 `params`：`model`、`max_tokens`、`system: this.systemPrompt`、`tools`、`messages: toAnthropicMessages(conv.getMessages())`、`signal: abortSignal`。
    - 用 `for await (const event of this.client.messages.stream(params))` 翻译事件：`content_block_delta.text_delta` → `text_delta`、`content_block_delta.input_json_delta` 拼到该 tool 的 args buffer、`content_block_stop` 把 buffer JSON.parse 后 yield `tool_call_complete`、`message_stop` 读 `event.message.stop_reason` 与 `event.message.usage` yield `stream_end`。
@@ -94,7 +112,9 @@
    - 构造请求：`stream: true`、`stream_options: { include_usage: true }`、`tools`、`signal: abortSignal`。
    - 翻译 `chunk.choices[0].delta.content` → `text_delta`；`delta.tool_calls[i].function.arguments` 拼分片；末尾 `finish_reason` + `chunk.usage` yield `stream_end`。
 
-**验证：** `pnpm typecheck` 通过；`pnpm test -- tests/providers` 通过（含 fake provider 用 `AsyncGenerator` 模拟流的单测）。
+**实际结果：** 当前 `Provider.stream(request)` 已接收包含 `systemPrompt`、`messages`、`tools`、`signal` 的 `ChatRequest`；两个原生 fetch Provider 已支持 SSE 分片、工具调用、usage、错误归一化和取消。第 03 章第 2 次只补充 Anthropic 流提前关闭时的统一 `done` 事件，避免未来 Loop 等待不到一轮结束。
+
+**验证：** `tests/llm/anthropic.test.ts`、`tests/llm/openai.test.ts` 与 `pnpm typecheck` 通过。
 
 ## T6: `Agent` ReAct 循环主体（核心）
 
@@ -122,7 +142,11 @@
    - **场景 E（取消 AC9 AC10）**：插桩工具 execute 中阻塞 1s；测试侧在 100ms 后调 `abortController.abort()`；断言 generator 最终 yield `{ type: "loop_complete", stopReason: "interrupted" }`、`conversation.getMessages()` 末尾配对合法（最后一条是 assistant 文本，无悬空 tool_use）。
    - **场景 F（Plan Mode AC13）**：`checker.mode = "plan"`；`fakeClient` 把收到的 `messages` 记录下来；断言最后一条 message 的 content 含 `"<system-reminder>"` + `"Plan mode is active"`；模拟模型调用 `ExitPlanMode` → 断言下一轮不再继续，yield `loop_complete`。
 
-**验证：** `pnpm test -- src/agent` 全通过；`pnpm typecheck` 无错误。
+**当前实现（第 03 章第 3 次）：** `Agent.run()` 已从固定两次 Provider 请求改为有限 `for` 循环。每轮先发出 `iteration_start`，收集模型响应；没有工具调用时结束，有调用时执行、回灌结果后进入下一轮。已实现最大轮次、连续未知工具、流错误和取消的最小停止收尾；只读并发/写入串行与 Plan Mode 留待后续阶段。
+
+**验证：** `pnpm typecheck` 通过。Agent 行为测试已按多轮场景改写，暂未运行（按当前开发节奏不主动运行自动化测试）。
+
+**第 03 章第 4 次补充：** 连续 `read` 工具作为一批并发执行，`write` / `command` 工具各自单独成批并保持相对顺序；结果始终按模型调用顺序回灌。新增最小 `PermissionChecker`：Plan Mode 只将只读工具 schema 发送给模型，并在执行层再次拒绝写入和命令工具。交互式授权确认、Plan Mode 退出后自动切回执行模式仍留待后续阶段。
 
 ## T7: TUI 接入 `agent.run()` 事件流
 
@@ -149,6 +173,8 @@
 5. 渲染：`<Static items={messages}>` 历史区不重渲染；动态区里 `currentTools.map(t => <ToolDisplay ... />)`；状态栏组件接收 `usage`、`iteration` 作为 props 显示。
 
 **验证：** `pnpm dev`（需 `.qicode/config.yaml` 配好 provider）启动 Ink 应用、跑一条多轮任务、Esc 中断、再发一条继续；`pnpm typecheck` 无错误。
+
+**当前实现（第 03 章第 5 次）：** App 已消费 `iteration_start`、`usage`、工具与完成事件；活动区显示当前轮次，token 按每个 `usage` 事件跨轮累加。流式期间 Esc 或 Ctrl+C 会 abort 当前任务并回到 idle，空闲时仍保持双击 Ctrl+C 退出。新增的 TUI 测试用例暂未运行，真实 API 手工体验留待整章验收。
 
 ## T8: 全量验证与端到端冒烟
 

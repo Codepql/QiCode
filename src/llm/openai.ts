@@ -1,10 +1,16 @@
 import type { ProviderConfig } from "../config/types.js";
 import type { ConversationMessage } from "../conversation/types.js";
-import { ProviderResponseError } from "./errors.js";
-import { assertSuccessfulResponse, normalizeFetchError, requireResponseBody } from "./http.js";
-import { parseSSE } from "./sse.js";
-import type { ChatRequest, Provider, StreamEvent } from "./types.js";
-import { buildProviderUrl } from "./url.js";
+import {
+  assertSuccessfulResponse,
+  buildProviderUrl,
+  normalizeFetchError,
+  parseSSE,
+  ProviderResponseError,
+  requireResponseBody,
+  type ChatRequest,
+  type Provider,
+} from "./client.js";
+import type { StreamEvent } from "./events.js";
 
 type FetchLike = typeof fetch;
 
@@ -73,13 +79,20 @@ export class OpenAIProvider implements Provider {
 
         const payload = parseJsonRecord(message.data);
         const usage = recordValue(payload.usage);
-        const inputTokens = numberValue(usage?.prompt_tokens);
+        const promptTokens = numberValue(usage?.prompt_tokens);
         const outputTokens = numberValue(usage?.completion_tokens);
-        if (inputTokens !== undefined || outputTokens !== undefined) {
+        const cacheReadInputTokens = numberValue(
+          recordValue(usage?.prompt_tokens_details)?.cached_tokens,
+        ) ?? 0;
+        if (promptTokens !== undefined || outputTokens !== undefined) {
           yield {
             type: "usage",
-            ...(inputTokens === undefined ? {} : { inputTokens }),
+            ...(promptTokens === undefined
+              ? {}
+              : { inputTokens: Math.max(0, promptTokens - cacheReadInputTokens) }),
             ...(outputTokens === undefined ? {} : { outputTokens }),
+            cacheReadInputTokens,
+            cacheCreationInputTokens: 0,
           };
         }
 

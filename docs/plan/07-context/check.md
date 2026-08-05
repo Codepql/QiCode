@@ -94,8 +94,8 @@
 
 ### ContextTooLongError 自愈
 
-- [ ] **C17**：`src/providers/errors.ts` 导出 `ContextTooLongError extends LLMError`。
-  - 验证：`grep -n "class ContextTooLongError" src/providers/errors.ts` 命中。
+- [ ] **C17**：`src/llm/client.ts` 导出 `ContextTooLongError extends LLMError`。
+  - 验证：`grep -n "class ContextTooLongError" src/llm/client.ts` 命中。
   - 验证：单测 `new ContextTooLongError("x") instanceof LLMError === true`。
 
 - [ ] **C18**：Anthropic provider 在 400 + `prompt is too long` 时构造 `ContextTooLongError`；OpenAI provider 在 `context_length_exceeded` 时同样。
@@ -110,7 +110,7 @@
   - 验证：`new Agent({ ..., contextWindow: 100000 })` → 内部字段 100000，下一轮 manageContext 用 100000 计算阈值。
 
 - [ ] **C20**：`UsageInfo` 类型含 `cacheReadInputTokens` 与 `cacheCreationInputTokens` 字段。
-  - 验证：`grep -n "cacheReadInputTokens\|cacheCreationInputTokens" src/providers/types.ts` 命中。
+  - 验证：`grep -n "cacheReadInputTokens\|cacheCreationInputTokens" src/llm/events.ts` 命中。
   - 验证：anthropic provider 在 stream_end 时把 `usage.cache_read_input_tokens` 映射到 `cacheReadInputTokens`。
 
 ---
@@ -202,7 +202,7 @@
   - usageAnchor 替换不累加。
 
 - [ ] **B8**：注释不出现外部引用语。
-  - 验证：跑一条针对 `src/toolresult/`、`src/compact/`、`src/conversation/`、`src/providers/errors.ts`、`src/session/`、`src/agent/agent.ts` 的禁用词扫描脚本，结果为空（脚本检测词表见仓库根目录约定）。
+  - 验证：跑一条针对 `src/toolresult/`、`src/compact/`、`src/conversation/`、`src/llm/client.ts`、`src/session/`、`src/agent/agent.ts` 的禁用词扫描脚本，结果为空（脚本检测词表见仓库根目录约定）。
 
 - [ ] **B9**：文档自检：spec / plan / task / checklist 本身不出现外部引用语。
   - 验证：跑同一条扫描脚本扫 `docs/typescript/第 07 章/`（排除本 checklist 自身），结果为空。

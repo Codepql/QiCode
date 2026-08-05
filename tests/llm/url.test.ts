@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildProviderUrl } from "../../src/providers/url.js";
+import { buildProviderUrl } from "../../src/llm/client.js";
 
 describe("buildProviderUrl", () => {
   it.each([

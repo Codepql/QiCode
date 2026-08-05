@@ -190,7 +190,7 @@
 **验证：** `pnpm typecheck` 通过；5 个类都能实例化
 
 ## T9: `--teammate` CLI 模式 — `src/teammate.ts`**文件：** `src/teammate.ts`
-**依赖：** T2、`src/agent/agent.ts`、`src/conversation/conversation.ts`、`src/tools/*`、`src/providers/types.ts` / `src/providers/create-provider.ts`、`src/prompt/builder.ts`、`src/permissions/checker.ts`、`src/config/config.ts`
+**依赖：** T2、`src/agent/agent.ts`、`src/conversation/conversation.ts`、`src/tools/*`、`src/llm/events.ts` / `src/llm/client.ts`、`src/prompt/builder.ts`、`src/permissions/checker.ts`、`src/config/config.ts`
 **步骤：**
 1. import `loadConfig` / `createProvider` / `ConversationManager` / `buildSystemPrompt` / `detectEnvironment` / 5 个工具类 / `PermissionChecker` / `Agent` / `FileStateCache` / `FileMailbox` / `FileMailMessage`
 2. 定义内部 `interface TeammateArgs { teamDir: string; memberName: string; initialTask: string; providerName?: string }`

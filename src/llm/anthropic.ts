@@ -1,14 +1,16 @@
 import type { ProviderConfig } from "../config/types.js";
 import type { ConversationMessage } from "../conversation/types.js";
-import { ProviderResponseError } from "./errors.js";
 import {
   assertSuccessfulResponse,
+  buildProviderUrl,
   normalizeFetchError,
+  parseSSE,
+  ProviderResponseError,
   requireResponseBody,
-} from "./http.js";
-import { parseSSE } from "./sse.js";
-import type { ChatRequest, Provider, StreamEvent } from "./types.js";
-import { buildProviderUrl } from "./url.js";
+  type ChatRequest,
+  type Provider,
+} from "./client.js";
+import type { StreamEvent } from "./events.js";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOKENS = 8192;
@@ -48,6 +50,7 @@ export class AnthropicProvider implements Provider {
     const thinkingBlocks = new Map<number, { thinking: string; signature: string }>();
     const toolCalls = new Map<number, { id: string; name: string; argumentsJson: string }>();
     let stopReason: string | undefined;
+    let doneEmitted = false;
     try {
       for await (const message of parseSSE(
         requireResponseBody(response),
@@ -57,17 +60,15 @@ export class AnthropicProvider implements Provider {
         const type = stringValue(payload.type);
 
         if (type === "message_start") {
-          const inputTokens = numberAt(payload, "message", "usage", "input_tokens");
-          const cacheReadInputTokens = numberAt(payload, "message", "usage", "cache_read_input_tokens");
-          const cacheCreationInputTokens = numberAt(payload, "message", "usage", "cache_creation_input_tokens");
-          if (inputTokens !== undefined || cacheReadInputTokens !== undefined || cacheCreationInputTokens !== undefined) {
-            yield {
-              type: "usage",
-              ...(inputTokens === undefined ? {} : { inputTokens }),
-              ...(cacheReadInputTokens === undefined ? {} : { cacheReadInputTokens }),
-              ...(cacheCreationInputTokens === undefined ? {} : { cacheCreationInputTokens }),
-            };
-          }
+          const usage = recordValue(recordValue(payload.message)?.usage);
+          yield {
+            type: "usage",
+            inputTokens: numberValue(usage?.input_tokens) ?? 0,
+            outputTokens: numberValue(usage?.output_tokens) ?? 0,
+            cacheReadInputTokens: numberValue(usage?.cache_read_input_tokens) ?? 0,
+            cacheCreationInputTokens:
+              numberValue(usage?.cache_creation_input_tokens) ?? 0,
+          };
         } else if (type === "content_block_start") {
           const index = numberValue(payload.index);
           const block = recordValue(payload.content_block);
@@ -137,6 +138,7 @@ export class AnthropicProvider implements Provider {
           yield stopReason === undefined
             ? { type: "done" }
             : { type: "done", stopReason };
+          doneEmitted = true;
         } else if (type === "error") {
           throw new ProviderResponseError("Anthropic stream returned an error event");
         }
@@ -144,28 +146,49 @@ export class AnthropicProvider implements Provider {
     } catch (error) {
       normalizeFetchError(error, request.signal);
     }
+
+    if (!doneEmitted) yield { type: "done" };
   }
 
   private buildRequestBody(request: ChatRequest): Record<string, unknown> {
+    const messages = request.messages.map(toAnthropicMessage);
+    markLastUserTailForCache(messages);
+    const tools = request.tools?.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.inputSchema,
+    }));
+    if (tools && tools.length > 0) {
+      Object.assign(tools.at(-1)!, { cache_control: { type: "ephemeral" } });
+    }
+
     return {
       model: this.config.model,
-      system: request.systemPrompt,
-      messages: request.messages.map(toAnthropicMessage),
+      system: [{
+        type: "text",
+        text: request.systemPrompt,
+        cache_control: { type: "ephemeral" },
+      }],
+      messages,
       stream: true,
       max_tokens: MAX_TOKENS,
       ...(this.config.thinking
         ? { thinking: { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS } }
         : {}),
-      ...(request.tools === undefined || request.tools.length === 0
-        ? {}
-        : {
-            tools: request.tools.map((tool) => ({
-              name: tool.name,
-              description: tool.description,
-              input_schema: tool.inputSchema,
-            })),
-          }),
+      ...(tools === undefined || tools.length === 0 ? {} : { tools }),
     };
+  }
+}
+
+function markLastUserTailForCache(messages: Record<string, unknown>[]): void {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
+    if (message.role !== "user" || !Array.isArray(message.content)) continue;
+    const lastBlock = message.content.at(-1);
+    if (typeof lastBlock === "object" && lastBlock !== null) {
+      Object.assign(lastBlock, { cache_control: { type: "ephemeral" } });
+    }
+    return;
   }
 }
 

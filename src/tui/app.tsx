@@ -4,10 +4,16 @@ import { Agent } from "../agent/agent.js";
 import type { ProviderConfig } from "../config/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import type { ConversationMessage } from "../conversation/types.js";
-import { createProvider } from "../providers/create-provider.js";
-import { formatProviderError } from "../providers/errors.js";
-import type { Provider } from "../providers/types.js";
-import { buildSystemPrompt } from "../prompt/system-prompt.js";
+import { createProvider, formatProviderError, type Provider } from "../llm/client.js";
+import { buildSystemPrompt, detectEnvironment } from "../prompt/builder.js";
+import {
+  buildPlanModeExitReminder,
+  buildPlanModeReentryReminder,
+  getPlanPath,
+  planFileExists,
+} from "../prompt/plan-mode.js";
+import type { EnvironmentContext } from "../prompt/sections.js";
+import { PermissionChecker, type AgentMode } from "../permissions/checker.js";
 import { BashTool } from "../tools/bash.js";
 import { EditFileTool } from "../tools/edit-file.js";
 import { GlobTool } from "../tools/glob.js";
@@ -29,12 +35,45 @@ export interface AppProps {
   providers: readonly ProviderConfig[];
   workDir?: string;
   requestTimeoutMs?: number;
+  runtimeFactory?: RuntimeFactory;
+}
+
+export interface AgentRuntime {
+  provider: Provider;
+  systemPrompt: string;
+}
+
+export type RuntimeFactory = (
+  config: ProviderConfig,
+  workDir: string,
+) => Promise<AgentRuntime>;
+
+type ProviderFactory = (config: ProviderConfig) => Promise<Provider>;
+type EnvironmentDetector = (workDir: string) => Promise<EnvironmentContext>;
+
+export async function initializeAgentRuntime(
+  config: ProviderConfig,
+  workDir: string,
+  providerFactory: ProviderFactory = createProvider,
+  environmentDetector: EnvironmentDetector = detectEnvironment,
+): Promise<AgentRuntime> {
+  const [provider, detectedEnvironment] = await Promise.all([
+    providerFactory(config),
+    environmentDetector(workDir),
+  ]);
+  const environment = { ...detectedEnvironment, model: config.model };
+
+  return {
+    provider,
+    systemPrompt: buildSystemPrompt(environment),
+  };
 }
 
 export function App({
   providers,
   workDir = process.cwd(),
   requestTimeoutMs = 120_000,
+  runtimeFactory = initializeAgentRuntime,
 }: AppProps) {
   const { exit } = useApp();
   const [selectedConfig, setSelectedConfig] = useState<ProviderConfig | undefined>(
@@ -46,14 +85,17 @@ export function App({
   const [status, setStatus] = useState<TurnStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [exitHint, setExitHint] = useState("");
+  const [mode, setMode] = useState<AgentMode>("default");
   const [inputTokens, setInputTokens] = useState<number>();
   const [outputTokens, setOutputTokens] = useState<number>();
+  const [iteration, setIteration] = useState<number>();
   const [startedAt, setStartedAt] = useState(Date.now());
   const conversationRef = useRef(new Conversation());
-  const providerRef = useRef<Provider | undefined>(undefined);
+  const runtimeRef = useRef<Promise<AgentRuntime> | undefined>(undefined);
   const abortRef = useRef<AbortController | undefined>(undefined);
   const lastCtrlCRef = useRef(0);
   const exitHintTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const busy = status === "waiting" || status === "streaming";
 
   useEffect(() => () => {
     abortRef.current?.abort();
@@ -61,11 +103,25 @@ export function App({
   }, []);
 
   useEffect(() => {
-    providerRef.current = selectedConfig ? createProvider(selectedConfig) : undefined;
-  }, [selectedConfig]);
+    runtimeRef.current = selectedConfig
+      ? startRuntime(runtimeFactory, selectedConfig, workDir)
+      : undefined;
+  }, [runtimeFactory, selectedConfig, workDir]);
 
   useInput((input, key) => {
+    if (key.escape && busy) {
+      abortRef.current?.abort();
+      setExitHint("Cancelling current task...");
+      return;
+    }
+
     if (key.ctrl && input === "c") {
+      if (busy) {
+        abortRef.current?.abort();
+        setExitHint("Cancelling current task...");
+        return;
+      }
+
       const now = Date.now();
       if (now - lastCtrlCRef.current <= 2_000) {
         exit();
@@ -73,7 +129,6 @@ export function App({
       }
 
       lastCtrlCRef.current = now;
-      abortRef.current?.abort();
       setExitHint("Press Ctrl+C again within 2s to exit.");
       if (exitHintTimerRef.current) clearTimeout(exitHintTimerRef.current);
       exitHintTimerRef.current = setTimeout(() => {
@@ -92,14 +147,34 @@ export function App({
     );
   }
 
-  const busy = status === "waiting" || status === "streaming";
-
   async function submit(rawText: string): Promise<void> {
-    const provider = providerRef.current;
     const config = selectedConfig;
-    if (busy || !provider || !config) return;
+    if (busy || !config) return;
     if (rawText.trim() === "/exit") {
       exit();
+      return;
+    }
+
+    const command = rawText.trim();
+    const planPath = getPlanPath(workDir);
+    if (command === "/plan") {
+      if (mode === "plan") return;
+      const reminder = buildPlanModeReentryReminder(
+        planPath,
+        planFileExists(planPath),
+      );
+      if (reminder) conversationRef.current.addSystemReminder(reminder);
+      setMessages(conversationRef.current.getMessages());
+      setMode("plan");
+      return;
+    }
+    if (command === "/do") {
+      if (mode === "default") return;
+      conversationRef.current.addSystemReminder(
+        buildPlanModeExitReminder(planPath, planFileExists(planPath)),
+      );
+      setMessages(conversationRef.current.getMessages());
+      setMode("default");
       return;
     }
 
@@ -110,6 +185,7 @@ export function App({
     setErrorMessage("");
     setInputTokens(undefined);
     setOutputTokens(undefined);
+    setIteration(undefined);
     setStatus("waiting");
     setStartedAt(Date.now());
 
@@ -122,18 +198,26 @@ export function App({
     }, requestTimeoutMs);
     let agentFailed = false;
     try {
+      const runtimePromise = runtimeRef.current
+        ?? startRuntime(runtimeFactory, config, workDir);
+      runtimeRef.current = runtimePromise;
+      const runtime = await runtimePromise;
       const registry = createToolRegistry();
       const agent = new Agent({
-        provider,
+        provider: runtime.provider,
         registry,
         conversation: conversationRef.current,
-        systemPrompt: buildSystemPrompt(workDir),
+        systemPrompt: runtime.systemPrompt,
         workDir,
         abortSignal: controller.signal,
+        permissionChecker: new PermissionChecker(mode),
       });
 
       for await (const event of agent.run()) {
-        if (event.type === "stream_text") {
+        if (event.type === "iteration_start") {
+          setIteration(event.iteration);
+          setStatus("streaming");
+        } else if (event.type === "stream_text") {
           setStreamingText((current) => current + event.text);
           setStatus("streaming");
         } else if (event.type === "thinking_text") {
@@ -152,8 +236,12 @@ export function App({
           setMessages(conversationRef.current.getMessages());
           setStreamingText("");
         } else if (event.type === "usage") {
-          if (event.inputTokens !== undefined) setInputTokens(event.inputTokens);
-          if (event.outputTokens !== undefined) setOutputTokens(event.outputTokens);
+          if (event.inputTokens !== undefined) {
+            setInputTokens((current) => (current ?? 0) + event.inputTokens!);
+          }
+          if (event.outputTokens !== undefined) {
+            setOutputTokens((current) => (current ?? 0) + event.outputTokens!);
+          }
         } else if (event.type === "error") {
           agentFailed = true;
           setErrorMessage(event.message);
@@ -161,7 +249,7 @@ export function App({
         }
       }
       setMessages(conversationRef.current.getMessages());
-      if (!controller.signal.aborted) setStatus(agentFailed ? "failed" : "idle");
+      setStatus(controller.signal.aborted || !agentFailed ? "idle" : "failed");
     } catch (error) {
       setErrorMessage(
         timedOut
@@ -174,6 +262,8 @@ export function App({
       abortRef.current = undefined;
       setStreamingText("");
       setActiveTools([]);
+      setIteration(undefined);
+      setExitHint("");
     }
   }
 
@@ -181,19 +271,33 @@ export function App({
     <Box flexDirection="column">
       <Header version={VERSION} model={selectedConfig.model} workDir={workDir} />
       <ChatView messages={messages} streamingText={streamingText} activeTools={activeTools} />
-      <Activity active={busy} label={status === "waiting" ? "Waiting" : "Thinking"} startedAt={startedAt} />
+      <Activity
+        active={busy}
+        label={status === "waiting" ? "Waiting" : iteration === undefined ? "Thinking" : `Iteration ${iteration}`}
+        startedAt={startedAt}
+      />
       {errorMessage && <Text color="red">Error: {errorMessage}</Text>}
       {exitHint && <Text color="yellow">{exitHint}</Text>}
       <Box marginTop={1} flexDirection="column">
         <InputBox disabled={busy} onSubmit={(value) => void submit(value)} />
         <StatusBar
-          mode={"default"}
+          mode={mode}
           {...(inputTokens === undefined ? {} : { inputTokens })}
           {...(outputTokens === undefined ? {} : { outputTokens })}
         />
       </Box>
     </Box>
   );
+}
+
+function startRuntime(
+  runtimeFactory: RuntimeFactory,
+  config: ProviderConfig,
+  workDir: string,
+): Promise<AgentRuntime> {
+  const runtime = runtimeFactory(config, workDir);
+  void runtime.catch(() => {});
+  return runtime;
 }
 
 function createToolRegistry(): ToolRegistry {

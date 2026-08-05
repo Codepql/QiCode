@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AnthropicProvider } from "../../src/providers/anthropic.js";
+import { AnthropicProvider } from "../../src/llm/anthropic.js";
 
 const encoder = new TextEncoder();
 const config = {
@@ -99,6 +99,22 @@ describe("AnthropicProvider", () => {
       { type: "tool_call_delta", toolId: "tool-1", argumentsDelta: "path\":\"README.md\"}" },
       { type: "tool_call_complete", toolId: "tool-1", toolName: "ReadFile", arguments: { file_path: "README.md" } },
       { type: "done", stopReason: "tool_use" },
+    ]);
+  });
+
+  it("emits done when an otherwise valid stream closes before message_stop", async () => {
+    const fetchImpl = (async () => response([
+      event({ type: "message_start", message: { usage: { input_tokens: 2 } } }),
+      event({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial" } }),
+    ])) as typeof fetch;
+    const provider = new AnthropicProvider(config, fetchImpl);
+
+    const events = await collect(provider.stream({ systemPrompt: "system", messages: [] }));
+
+    expect(events).toEqual([
+      { type: "usage", inputTokens: 2 },
+      { type: "text_delta", text: "partial" },
+      { type: "done" },
     ]);
   });
 });

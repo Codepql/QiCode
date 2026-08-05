@@ -228,7 +228,7 @@ anthropic · claude-sonnet · in 120 · out 64 · Ctrl+C exit
 | N1 | 支持 Node.js 22 LTS，使用 pnpm 管理依赖 |
 | N2 | TypeScript 开启严格模式，生产代码不使用无理由的 `any` |
 | N3 | 网络请求和 SSE 解析不得阻塞 TUI 输入与渲染 |
-| N4 | Provider 差异限制在 `src/providers/` 内 |
+| N4 | Provider 差异限制在 `src/llm/` 内 |
 | N5 | API Key 不进入日志、错误详情、测试快照或版本库 |
 | N6 | 核心逻辑可单元测试，协议适配可用本地模拟流测试 |
 | N7 | 常见 Windows Terminal、PowerShell、macOS Terminal 和 Linux 终端可正常使用 |

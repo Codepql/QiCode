@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OpenAIProvider } from "../../src/providers/openai.js";
+import { OpenAIProvider } from "../../src/llm/openai.js";
 
 const encoder = new TextEncoder();
 const config = {

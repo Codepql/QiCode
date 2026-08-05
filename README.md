@@ -102,7 +102,7 @@ pnpm dev
 ```
 
 ```text
-列出 src/providers 目录中的 TypeScript 文件。
+列出 src/llm 目录中的 TypeScript 文件。
 ```
 
 退出时输入 `/exit`，或在两秒内连续按两次 `Ctrl+C`。
@@ -140,7 +140,7 @@ src/
   config/         # YAML 配置加载与校验
   conversation/   # 对话、thinking、工具调用和工具结果
   prompt/         # 系统提示词与工具规则
-  providers/      # Provider 契约、SSE、Anthropic、OpenAI
+  llm/             # Provider 契约、SSE、Anthropic、OpenAI
   tools/          # 内置工具与注册中心
   tui/            # Ink 终端界面
 ```

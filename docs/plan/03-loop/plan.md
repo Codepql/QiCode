@@ -25,7 +25,7 @@
 第 03 章 不新增包，在 第 02 章「tools / llm / conversation / prompt / tui」之上**扩展**：
 
 - **src/agent/**（新增）：`Agent` 类承载 ReAct 循环；`AgentEvent` discriminated union 定义对外事件；`StreamingExecutor` 跑工具批。
-- **src/providers/**（扩展）：`StreamEvent` 增 `stream_end` 携带 `UsageInfo`；`Provider.stream()` 接受 `AbortSignal` 形参。
+- **src/llm/**（扩展）：`StreamEvent` 增 `stream_end` 携带 `UsageInfo`；`Provider.stream()` 接受 `AbortSignal` 形参。
 - **src/tools/**（扩展）：`Tool` 接口增 `category: "read" | "write" | "command"` 字段；`ToolRegistry` 仅暴露 `get()` / `getAllSchemas(protocol)` / `listTools()`。
 - **src/conversation/**（扩展）：`ConversationManager.addAssistantFull()` 支持携带 `toolUses` 与 `thinkingBlocks`；`addToolResultsMessage()` 一次性写一组 `ToolResultBlock`；`addSystemReminder()` 写 `<system-reminder>` 包裹的 user 消息。
 - **src/prompt/**（扩展）：`buildPlanModeReminder()` 按 iteration 切换完整/精简提示；常量 `planModeFullReminder` / `planModeSparseReminder` 定义在 `src/prompt/plan-mode.ts`。
@@ -124,7 +124,7 @@ export class StreamingExecutor {
 }
 ```
 
-### `src/providers/types.ts` 与 `src/providers/types.ts` / `src/providers/create-provider.ts`
+### `src/llm/events.ts` 与 `src/llm/events.ts` / `src/llm/client.ts`
 
 ```ts
 export interface UsageInfo {
@@ -273,13 +273,13 @@ private async executeTools(toolUses: ToolUseBlock[]): Promise<AgentEvent[]> {
 
 `collectResults()` 用 `[...this.pending]` 复制队列、清空 `this.pending`，对每个调用 `Promise.all` 跑 `tool.execute(args, ctx)`；未注册工具直接返回 `{ output: "Error: unknown tool '...'", isError: true }`，`execute()` throw 时返回 `{ output: "Error executing ...: ...", isError: true }`。
 
-### src/providers/anthropic.ts、src/providers/openai.ts（扩展）
+### src/llm/anthropic.ts、src/llm/openai.ts（扩展）
 
 **职责：** 把 第 02 章 的同步消息收集改为 `AsyncGenerator<StreamEvent>`，在 `stream_end` 上抛 `usage`。
 
 - `AnthropicProvider.stream(request)`：沿用第 02 章原生 fetch 工具调用解析，并响应 `request.signal`。
 - `OpenAIProvider.stream(request)`：沿用第 02 章 Chat Completions SSE 工具调用解析，并响应 `request.signal`。
-- 错误归一化：`ContextTooLongError`、`RateLimitError`、`AuthenticationError`、`NetworkError`、`LLMError`（`src/providers/errors.ts`）。
+- 错误归一化：`ContextTooLongError`、`RateLimitError`、`AuthenticationError`、`NetworkError`、`LLMError`（`src/llm/client.ts`）。
 
 ### src/tools/registry.ts、src/tools/types.ts（扩展）
 

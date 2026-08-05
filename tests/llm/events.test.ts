@@ -1,10 +1,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { ProviderConfig } from "../../src/config/types.js";
-import type {
-  ChatRequest,
-  Provider,
-  StreamEvent,
-} from "../../src/providers/types.js";
+import type { ChatRequest, Provider } from "../../src/llm/client.js";
+import type { StreamEvent } from "../../src/llm/events.js";
 
 describe("Provider contract", () => {
   it("supports protocol-independent asynchronous stream events", async () => {

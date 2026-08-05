@@ -55,7 +55,7 @@ App 的职责是接收输入和渲染状态。如果把“请求模型、解析�
 两个 Provider 各自在内部累计 JSON，最后都输出 tool_call_complete { toolId, toolName, arguments }。Agent 完全不需要判断当前是 Anthropic 还是 OpenAI。
 ```
 
-代码证据：[types.ts](../../../src/providers/types.ts:8)、[anthropic.ts](../../../src/providers/anthropic.ts:101)、[openai.ts](../../../src/providers/openai.ts:93)。
+代码证据：[types.ts](../../../src/llm/events.ts:8)、[anthropic.ts](../../../src/llm/anthropic.ts:101)、[openai.ts](../../../src/llm/openai.ts:93)。
 
 ### Q3. 为什么工具参数不能一收到分片就 JSON.parse？
 

@@ -28,7 +28,7 @@
 
 - **`src/tools/`（新建）**：统一 `Tool` 接口、`ToolResult`、`ToolContext`、`ToolRegistry`、6 个工具实现、`descriptions.ts` 模型可见的工具说明。零外部依赖，不感知 LLM 协议。
 - **`src/agent/`（新建）**：`Agent.run()` 是 `AsyncGenerator<AgentEvent>`，承载单轮闭环；`StreamingExecutor` 把已完成的工具调用通过 `Promise.all` 并发跑出来；`events.ts` 定义协议无关的 `AgentEvent` 联合类型。
-- **`src/providers/`（扩展）**：`StreamEvent` 增加工具调用事件；`ChatRequest` 增加可选 `tools`，保持 `Provider.stream(request)` 单参数契约；Anthropic 与 OpenAI Provider 分别注入工具定义、解析工具调用并映射历史中的工具结果。
+- **`src/llm/`（扩展）**：`StreamEvent` 增加工具调用事件；`ChatRequest` 增加可选 `tools`，保持 `Provider.stream(request)` 单参数契约；Anthropic 与 OpenAI Provider 分别注入工具定义、解析工具调用并映射历史中的工具结果。
 - **`src/conversation/`（扩展）**：统一 `ConversationBlock` 保存文本、thinking、tool use 和 tool result；新增 `addAssistantMessage(content)` 与 `addToolResultsMessage(results)`。
 - **`src/prompt/`（扩展）**：`sections.ts` 增加 `usingToolsSection` / `executingActionsSection` 等说明 Agent 角色与工具使用规约。
 - **`src/tui/`（扩展）**：`tool-display.tsx` 渲染工具行；`chat-view.tsx` 从对话 block 找到工具调用和结果；`app.tsx` 消费 `AgentEvent` 并更新动态状态。
@@ -109,7 +109,7 @@ export class ToolRegistry {
 
 `getAllSchemas("anthropic")` 直接平铺每个工具 `schema()` 的 `{ name, description, input_schema }`；OpenAI再包一层 `{ type: "function", function: { name, description, parameters } }`。
 
-### `src/providers/types.ts`
+### `src/llm/events.ts`
 
 ```ts
 export interface UsageInfo {
@@ -129,7 +129,7 @@ export type StreamEvent =
   | { type: "stream_end"; stopReason: string; usage: UsageInfo };
 ```
 
-### `src/providers/types.ts` / `src/providers/create-provider.ts`
+### `src/llm/events.ts` / `src/llm/client.ts`
 
 ```ts
 export interface Provider {
@@ -331,7 +331,7 @@ export class StreamingExecutor {
    - `yield { type: "turn_complete" }`。
 6. 工具结果回灌后发起第二次 stream，只用于生成最终文本；若第二次仍请求工具，发出单轮上限错误且不执行。多轮 Agent Loop 留待第 03 章。
 
-### `src/providers/anthropic.ts`
+### `src/llm/anthropic.ts`
 
 **职责：** 注入工具定义、解析流式工具调用、按 Anthropic 格式回灌历史。
 **关键点：**
@@ -348,7 +348,7 @@ export class StreamingExecutor {
   - 含 `toolResults` 的 user → `role: "user"`、content 为 `tool_result` block 数组。
 - 错误分类：`Anthropic.APIError` 按 status 转 `ContextTooLongError` / `AuthenticationError` / `RateLimitError` / `LLMError`。
 
-### `src/providers/openai.ts`
+### `src/llm/openai.ts`
 
 **职责：** OpenAI Chat Completions 官方与兼容端点的单一 Provider；注入工具定义、解析流式工具调用、按各自格式回灌。
 **关键点（OpenAIProvider，Chat Completions）：**
