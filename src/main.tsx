@@ -5,7 +5,11 @@ import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { render } from "ink";
-import { loadConfig, resolveConfigPath } from "./config/load-config.js";
+import {
+  loadConfig,
+  loadMcpConfigLayers,
+  resolveConfigPath,
+} from "./config/load-config.js";
 import { App } from "./tui/app.js";
 export { VERSION, versionText } from "./version.js";
 
@@ -13,9 +17,15 @@ const entryPath = process.argv[1];
 if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
   const args = process.argv.slice(2);
   resolveStartupConfigPath(args)
-    .then((configPath) => loadConfig(configPath))
-    .then((config) => render(
-      <App providers={config.providers} />,
+    .then(async (configPath) => {
+      const [config, mcpConfig] = await Promise.all([
+        loadConfig(configPath),
+        loadMcpConfigLayers(),
+      ]);
+      return { config, mcpConfig };
+    })
+    .then(({ config, mcpConfig }) => render(
+      <App providers={config.providers} mcpServers={mcpConfig.mcp_servers} />,
       { exitOnCtrlC: false },
     ))
     .catch((error: unknown) => {

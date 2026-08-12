@@ -3,6 +3,8 @@ import { render } from "ink-testing-library";
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderConfig } from "../../src/config/types.js";
 import type { ChatRequest, Provider } from "../../src/llm/client.js";
+import type { MCPClient } from "../../src/mcp/client.js";
+import type { MCPManager } from "../../src/mcp/manager.js";
 import type { EnvironmentContext } from "../../src/prompt/sections.js";
 import { App, initializeAgentRuntime } from "../../src/tui/app.js";
 
@@ -87,6 +89,97 @@ describe("App", () => {
     );
 
     expect(view.lastFrame()).toContain("default");
+    view.unmount();
+  });
+
+  it("connects MCP for the session, keeps deferred tools hidden, and reports status", async () => {
+    const requests: ChatRequest[] = [];
+    const runtimeFactory = vi.fn(async () => ({
+      provider: fakeProvider(requests),
+      systemPrompt: "system",
+    }));
+    const client = { callTool: vi.fn(async () => "ok") } as unknown as MCPClient;
+    const manager = {
+      connectAll: vi.fn(async () => ({
+        tools: [{
+          serverName: "github",
+          tool: {
+            name: "create_issue",
+            description: "Create an issue",
+            inputSchema: { type: "object", properties: {} },
+          },
+        }],
+        servers: ["github"],
+        errors: [],
+        instructions: [{ serverName: "github", text: "Use issues carefully." }],
+      })),
+      getClient: vi.fn(() => client),
+      disconnectAll: vi.fn(async () => {}),
+    };
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        mcpServers={[{ name: "github", command: "unused" }]}
+        runtimeFactory={runtimeFactory}
+        mcpManagerFactory={() => manager as unknown as MCPManager}
+      />,
+    );
+
+    await waitFor(() => manager.connectAll.mock.calls.length === 1);
+    await waitFor(() => manager.getClient.mock.calls.length > 0);
+    await waitFor(() => (view.lastFrame() ?? "").includes("MCP servers (1):"));
+    expect(view.lastFrame()).toContain("github");
+    expect(view.lastFrame()).toContain("Tools: 1 total");
+
+    view.stdin.write("hello");
+    await waitFor(() => (view.lastFrame() ?? "").includes("hello"));
+    view.stdin.write("\r");
+    await waitFor(() => requests.length === 1);
+    expect(requests[0]?.tools?.map((tool) => tool.name)).toContain("ToolSearch");
+    expect(requests[0]?.tools?.map((tool) => tool.name)).not.toContain(
+      "mcp__github__create_issue",
+    );
+    expect(requests[0]?.messages.some((message) =>
+      message.content.some((block) =>
+        block.type === "text" && block.text.includes("# MCP Server: github")
+      )
+    )).toBe(true);
+
+    view.unmount();
+    await waitFor(() => manager.disconnectAll.mock.calls.length === 1);
+  });
+
+  it("shows sanitized MCP connection failures without injecting them into model history", async () => {
+    const requests: ChatRequest[] = [];
+    const manager = {
+      connectAll: vi.fn(async () => ({
+        tools: [],
+        servers: [],
+        errors: [{ serverName: "bad", error: "\u001b[31moffline\u001b[0m" }],
+        instructions: [],
+      })),
+      getClient: vi.fn(),
+      disconnectAll: vi.fn(async () => {}),
+    };
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        mcpServers={[{ name: "bad", command: "unused" }]}
+        runtimeFactory={vi.fn(async () => ({
+          provider: fakeProvider(requests),
+          systemPrompt: "system",
+        }))}
+        mcpManagerFactory={() => manager as unknown as MCPManager}
+      />,
+    );
+
+    await waitFor(() => (view.lastFrame() ?? "").includes("MCP errors: bad: offline"));
+    expect(view.lastFrame()).not.toContain("\u001b[31m");
+    view.stdin.write("hello");
+    await waitFor(() => (view.lastFrame() ?? "").includes("hello"));
+    view.stdin.write("\r");
+    await waitFor(() => requests.length === 1);
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("offline");
     view.unmount();
   });
 });

@@ -333,7 +333,7 @@ function toolDefinitions(
   registry: ToolRegistry,
   checker: PermissionChecker,
 ): ToolDefinition[] {
-  return registry.listTools().filter((tool) => checker.allows(tool.category)).map((tool) => {
+  return registry.listToolsForModel().filter((tool) => checker.allows(tool.category)).map((tool) => {
     const schema = tool.schema();
     const inputSchema = schema["input_schema"];
     return {

@@ -31,9 +31,9 @@ export function InputBox({ disabled = false, columns, permMode, onSubmit }: Inpu
     if (key.return) {
       const submitted = value.trim();
       if (submitted) {
-        onSubmit(value);
         setValue("");
         setCursor(0);
+        onSubmit(value);
       }
       return;
     }

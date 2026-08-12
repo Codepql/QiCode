@@ -1,7 +1,7 @@
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { Agent } from "../agent/agent.js";
-import type { ProviderConfig } from "../config/types.js";
+import type { MCPServerConfig, ProviderConfig } from "../config/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import type { ConversationMessage } from "../conversation/types.js";
 import { createProvider, formatProviderError, type Provider } from "../llm/client.js";
@@ -14,12 +14,15 @@ import {
 } from "../prompt/plan-mode.js";
 import type { EnvironmentContext } from "../prompt/sections.js";
 import { PermissionChecker, type PermissionMode } from "../permissions/checker.js";
+import { MCPManager } from "../mcp/manager.js";
+import { MCPToolWrapper } from "../mcp/tool-wrapper.js";
 import { BashTool } from "../tools/bash.js";
 import { EditFileTool } from "../tools/edit-file.js";
 import { GlobTool } from "../tools/glob.js";
 import { GrepTool } from "../tools/grep.js";
 import { ReadFileTool } from "../tools/read-file.js";
 import { ToolRegistry } from "../tools/registry.js";
+import { ToolSearchTool } from "../tools/tool-search.js";
 import { WriteFileTool } from "../tools/write-file.js";
 import { VERSION } from "../version.js";
 import { Activity } from "./activity.js";
@@ -35,9 +38,11 @@ type TurnStatus = "idle" | "waiting" | "streaming" | "failed";
 
 export interface AppProps {
   providers: readonly ProviderConfig[];
+  mcpServers?: readonly MCPServerConfig[];
   workDir?: string;
   requestTimeoutMs?: number;
   runtimeFactory?: RuntimeFactory;
+  mcpManagerFactory?: () => MCPManager;
 }
 
 export interface AgentRuntime {
@@ -52,6 +57,7 @@ export type RuntimeFactory = (
 
 type ProviderFactory = (config: ProviderConfig) => Promise<Provider>;
 type EnvironmentDetector = (workDir: string) => Promise<EnvironmentContext>;
+const createMcpManager = (): MCPManager => new MCPManager();
 
 export async function initializeAgentRuntime(
   config: ProviderConfig,
@@ -73,9 +79,11 @@ export async function initializeAgentRuntime(
 
 export function App({
   providers,
+  mcpServers = [],
   workDir = process.cwd(),
   requestTimeoutMs = 120_000,
   runtimeFactory = initializeAgentRuntime,
+  mcpManagerFactory = createMcpManager,
 }: AppProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
@@ -100,10 +108,22 @@ export function App({
   const [iteration, setIteration] = useState<number>();
   const [startedAt, setStartedAt] = useState(Date.now());
   const conversationRef = useRef(new Conversation());
+  const registryRef = useRef<ToolRegistry | null>(null);
+  const mcpManagerRef = useRef<MCPManager | null>(null);
+  const mcpManagerFactoryRef = useRef(mcpManagerFactory);
+  mcpManagerFactoryRef.current = mcpManagerFactory;
   const runtimeRef = useRef<Promise<AgentRuntime> | undefined>(undefined);
   const abortRef = useRef<AbortController | undefined>(undefined);
   const lastCtrlCRef = useRef(0);
   const exitHintTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [mcpInfo, setMcpInfo] = useState<{
+    servers: string[];
+    toolCount: number;
+    failedServerCount: number;
+  }>({ servers: [], toolCount: 0, failedServerCount: 0 });
+  const mcpInfoRef = useRef(mcpInfo);
+  const [mcpNotice, setMcpNotice] = useState("");
+  if (registryRef.current === null) registryRef.current = createToolRegistry();
   const busy = status === "waiting" || status === "streaming";
   const chatChromeRows =
     8 +
@@ -115,6 +135,56 @@ export function App({
   useEffect(() => () => {
     abortRef.current?.abort();
     if (exitHintTimerRef.current) clearTimeout(exitHintTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    if (mcpServers.length === 0) return;
+
+    const manager = mcpManagerFactoryRef.current();
+    mcpManagerRef.current = manager;
+    let disposed = false;
+    void manager.connectAll(mcpServers).then((result) => {
+      if (disposed || mcpManagerRef.current !== manager) return;
+
+      const registry = registryRef.current!;
+      for (const { serverName, tool } of result.tools) {
+        const client = manager.getClient(serverName);
+        if (client !== undefined) {
+          registry.register(new MCPToolWrapper(client, serverName, tool));
+        }
+      }
+      for (const instruction of result.instructions) {
+        conversationRef.current.addSystemReminder(
+          `# MCP Server: ${instruction.serverName}\n${instruction.text}`,
+        );
+      }
+      if (result.errors.length > 0) {
+        setMcpNotice(
+          `MCP errors: ${result.errors.map((entry) => `${entry.serverName}: ${sanitizeMcpError(entry.error)}`).join("; ")}`,
+        );
+      }
+      if (result.instructions.length > 0) setMessages(conversationRef.current.getMessages());
+      const info = {
+        servers: result.servers,
+        toolCount: result.tools.length,
+        failedServerCount: result.errors.length,
+      };
+      mcpInfoRef.current = info;
+      setMcpInfo(info);
+      if (result.servers.length > 0) {
+        setMcpNotice(
+          `MCP servers (${result.servers.length}): ${result.servers.join(", ")}\nTools: ${result.tools.length} total`,
+        );
+      }
+    });
+
+    return () => {
+      disposed = true;
+      if (mcpManagerRef.current === manager) mcpManagerRef.current = null;
+      void manager.disconnectAll();
+    };
+  // MCP configuration is fixed for the lifetime of one terminal session.
+  // Depending on the array prop would reconnect whenever a parent recreates it.
   }, []);
 
   useEffect(() => {
@@ -209,6 +279,13 @@ export function App({
       setMode("default");
       return;
     }
+    if (command === "/mcp" || command === "/status") {
+      const currentMcpInfo = mcpInfoRef.current;
+      setMcpNotice(currentMcpInfo.servers.length === 0
+        ? "No MCP servers connected."
+        : `MCP servers (${currentMcpInfo.servers.length}): ${currentMcpInfo.servers.join(", ")}\nTools: ${currentMcpInfo.toolCount} total`);
+      return;
+    }
     if (command.startsWith("/permission")) {
       const modes: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
       const parts = command.slice("/permission".length).trim().split(/\s+/).filter(Boolean);
@@ -252,7 +329,7 @@ export function App({
         ?? startRuntime(runtimeFactory, config, workDir);
       runtimeRef.current = runtimePromise;
       const runtime = await runtimePromise;
-      const registry = createToolRegistry();
+      const registry = registryRef.current!;
       const agent = new Agent({
         provider: runtime.provider,
         registry,
@@ -352,6 +429,7 @@ export function App({
         startedAt={startedAt}
       />
       {errorMessage && <Text color="red">Error: {errorMessage}</Text>}
+      {mcpNotice && <Text color="yellow">{mcpNotice}</Text>}
       {exitHint && <Text color="yellow">{exitHint}</Text>}
       {permissionRequest && (
         <PermissionDialog
@@ -381,6 +459,12 @@ export function App({
   );
 }
 
+function sanitizeMcpError(message: string): string {
+  return message
+    .replace(/\u001B\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
+}
+
 function startRuntime(
   runtimeFactory: RuntimeFactory,
   config: ProviderConfig,
@@ -399,5 +483,6 @@ function createToolRegistry(): ToolRegistry {
   registry.register(new BashTool());
   registry.register(new GlobTool());
   registry.register(new GrepTool());
+  registry.register(new ToolSearchTool(registry));
   return registry;
 }

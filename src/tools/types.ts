@@ -15,6 +15,8 @@ export interface Tool {
   name: string;
   description: string;
   category: ToolCategory;
+  deferred?: boolean;
+  system?: boolean;
   schema(): Record<string, unknown>;
   execute(
     args: Record<string, unknown>,

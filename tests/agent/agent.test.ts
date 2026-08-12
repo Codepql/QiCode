@@ -24,6 +24,24 @@ describe("Agent", () => {
     expect(Conversation.visibleText(conversation.getMessages().at(-1)!)).toBe("hello");
   });
 
+  it("sends deferred tools only after the registry marks them discovered", async () => {
+    const registry = new ToolRegistry();
+    const deferred = fakeTool("Deferred", "unused");
+    deferred.deferred = true;
+    registry.register(deferred);
+    const hiddenProvider = new FakeProvider([[{ type: "done" }]]);
+
+    await collect(agent(hiddenProvider, registry, conversationWithUser()));
+    expect(hiddenProvider.requests[0]?.tools).toBeUndefined();
+
+    registry.markDiscovered("Deferred");
+    const visibleProvider = new FakeProvider([[{ type: "done" }]]);
+    await collect(agent(visibleProvider, registry, conversationWithUser()));
+    expect(visibleProvider.requests[0]?.tools?.map((tool) => tool.name)).toEqual([
+      "Deferred",
+    ]);
+  });
+
   it("continues across tool batches until the model returns text", async () => {
     const provider = new FakeProvider([
       [toolCall("read-1", "ReadFile"), { type: "done", stopReason: "tool_use" }],

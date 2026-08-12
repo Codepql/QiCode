@@ -4,9 +4,7 @@ dist/
 coverage/
 *.log
 
-.QiCode/config.yaml
-.QiCode/config.local.yaml
-.QiCode/permissions.local.yaml
+.QiCode/*
 config.local.yaml
 .env
 .env.*
