@@ -220,14 +220,14 @@ c.check("WriteFile", "write", { file_path: "/tmp/test/x" }); // ask / Mode: defa
    ```
 9. （可选）在 `cmdRegistry` 初始化时注册 `{ name: "permission", description: "Show/set permission mode" }` 元数据，让斜杠下拉框能找到。
 
-**验证：** `pnpm typecheck` 通过；`pnpm dev` 启动，看输入框上方有"on" 徽标（非 default 模式时），按 Shift+Tab 看徽标颜色与文字按 default→Accept Edits→Plan→YOLO 循环。
+**验证：** `pnpm typecheck` 通过；`pnpm dev` 启动，看输入框上方有"on" 徽标（非 default 模式时），按 Shift+Tab 看徽标颜色与文字按 default→Accept Edits→Plan→manual 循环。
 
 ## T5: InputBox 与 StatusBar 显示模式**文件：** `src/tui/input.tsx`、`src/tui/status-bar.tsx`
 **依赖：** T4
 **步骤：**
 1. `input.tsx`：
    - 顶部加 `import type { PermissionMode } from "../permissions/checker.js"`。
-   - 定义 `const modeDisplay: Record<string, {name:string; color:string}>`：`default→gray "default"`、`acceptEdits→green "Accept Edits"`、`plan→yellow "Plan"`、`bypassPermissions→red "YOLO"`。
+   - 定义 `const modeDisplay: Record<string, {name:string; color:string}>`：`default→gray "default"`、`acceptEdits→green "Accept Edits"`、`plan→yellow "Plan"`、`bypassPermissions→red "manual"`。
    - 定义 `const modeCycle: PermissionMode[] = ["default","acceptEdits","plan","bypassPermissions"]`。
    - `Props` 增 `permMode?: PermissionMode`、`onModeChange?: (mode: PermissionMode) => void`。
    - `useInput` 内增分支：`if ((input === "\x1b[Z" || (key.tab && key.shift)) && onModeChange) { const idx = modeCycle.indexOf(permMode); onModeChange(modeCycle[(idx+1) % modeCycle.length]); return; }`。
@@ -274,8 +274,8 @@ c.check("WriteFile", "write", { file_path: "/tmp/test/x" }); // ask / Mode: defa
 4. `pnpm typecheck` 全仓库 0 错误。
 5. **tmux 实跑冒烟**（CLAUDE.md 开发原则第 2 条）：
    - 默认模式让模型写一个新文件 → 弹 PermissionDialog；
-   - 按 Shift+Tab 切到 YOLO（红色）→ 再让模型跑 `ls` 直接执行不弹窗；
-   - 在 YOLO 下让模型跑 `rm -rf /` → 仍被 Layer 3 拦下，回灌错误；
+   - 按 Shift+Tab 切到 manual（红色）→ 再让模型跑 `ls` 直接执行不弹窗；
+   - 在 manual 下让模型跑 `rm -rf /` → 仍被 Layer 3 拦下，回灌错误；
    - `/permission mode plan` 进 plan 模式后 LLM 写 `.qicode/plans/xxx.md` 不弹窗，写其他文件仍弹窗；
    - HITL 弹窗时按 Esc → Dialog 消失、Agent 回灌 deny、Loop 继续。
 

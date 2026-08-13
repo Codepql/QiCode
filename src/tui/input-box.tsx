@@ -1,10 +1,12 @@
 import { Box, Text, useInput } from "ink";
 import { useEffect, useState } from "react";
+import type { PermissionMode } from "../permissions/checker.js";
 import { sanitizeTerminalText } from "./sanitize-terminal.js";
 
 export interface InputBoxProps {
   disabled?: boolean;
   columns?: number;
+  permMode?: PermissionMode;
   onSubmit(value: string): void;
 }
 
@@ -22,9 +24,9 @@ export function InputBox({ disabled = false, columns, onSubmit }: InputBoxProps)
     if (key.return) {
       const submitted = value.trim();
       if (submitted) {
-        onSubmit(value);
         setValue("");
         setCursor(0);
+        onSubmit(value);
       }
       return;
     }
@@ -60,19 +62,21 @@ export function InputBox({ disabled = false, columns, onSubmit }: InputBoxProps)
   const after = sanitizeTerminalText(value.slice(cursor + 1));
 
   return (
-    <Box
-      flexDirection="row"
-      marginRight={1}
-      {...(columns === undefined ? {} : { width: Math.max(4, columns - 1) })}
-    >
-      <Text color={disabled ? "gray" : "cyan"}>&gt; </Text>
-      {disabled ? (
-        <Text dimColor>Waiting for response...</Text>
-      ) : (
-        <Text>
-          {before}<Text inverse>{atCursor}</Text>{after}
-        </Text>
-      )}
+    <Box flexDirection="column">
+      <Box
+        flexDirection="row"
+        marginRight={1}
+        {...(columns === undefined ? {} : { width: Math.max(4, columns - 1) })}
+      >
+        <Text color={disabled ? "gray" : "cyan"}>&gt; </Text>
+        {disabled ? (
+          <Text dimColor>Waiting for response...</Text>
+        ) : (
+          <Text>
+            {before}<Text inverse>{atCursor}</Text>{after}
+          </Text>
+        )}
+      </Box>
     </Box>
   );
 }

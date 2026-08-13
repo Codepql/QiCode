@@ -5,7 +5,7 @@
 QiCode 是一个面向终端的 AI Coding Agent。它使用统一 Provider 接口接入 Anthropic 与 OpenAI 协议，通过 SSE 流式输出，并逐步提供文件读取、代码搜索、文件编辑和命令执行能力。
 
 > [!WARNING]
-> QiCode 仍处于早期开发阶段，接口、行为和目录结构都可能变化。当前版本尚未提供权限确认、工作区路径沙箱或危险命令拦截；请仅在测试目录中使用写文件和 Shell 工具，不要用于生产环境或重要仓库。
+> QiCode 仍处于早期开发阶段，接口、行为和目录结构都可能变化。项目已提供权限确认（人在回路）、工作区路径沙箱与危险命令拦截，但它们是启发式防线而非完备保证：危险命令黑名单无法穷尽所有风险，Bash 类工具不走路径沙箱，切换到 manual（全放行）模式请自行承担风险。请避免在包含重要数据的仓库中运行。
 
 ## Features
 
@@ -15,7 +15,7 @@ QiCode 是一个面向终端的 AI Coding Agent。它使用统一 Provider 接�
 - **Conversation history** - 在当前进程内维护多轮对话上下文。
 - **Extended thinking** - 支持 Anthropic extended thinking，并在后续请求中保留必要的 signature。
 - **Built-in tools** - 提供 `ReadFile`、`WriteFile`、`EditFile`、`Bash`、`Glob`、`Grep`。
-- **Tool calling** - 支持两种 Provider 的流式工具调用解析、工具结果回灌和单轮工具闭环。
+- **Tool calling / Agent Loop** - 支持两种 Provider 的流式工具调用解析、工具结果回灌与多轮 Agent Loop（最大轮数、取消）。
 
 ## Demo
 
@@ -67,14 +67,14 @@ pnpm dev -- --config path/to/config.yaml
 providers:
   - name: claude
     protocol: anthropic
-    model: claude-sonnet-4-5
+    model: claude-sonnet-5
     base_url: https://api.anthropic.com
     api_key: ${ANTHROPIC_API_KEY}
     thinking: true
 
   - name: openai
     protocol: openai
-    model: gpt-4.1
+    model: gpt-5.5
     base_url: https://api.openai.com/v1
     api_key: ${OPENAI_API_KEY}
 ```
@@ -118,7 +118,7 @@ pnpm dev
 | `EditFile` | 精确替换文件中已有的文本。 |
 | `Bash` | 在当前平台 Shell 中执行命令。 |
 
-当前工具流程限制为：一次用户请求最多执行一批工具；工具结果回灌给模型后，模型可以生成最终回答，但不会继续执行第二批工具。完整的多轮 Agent Loop 计划在后续版本实现。
+Agent 以多轮方式运行：模型可连续发起多批工具调用，工具结果回灌后继续推理，直到给出最终回答或达到最大轮数（默认 20）。权限系统在工具执行前拦截：安全只读命令自动放行、危险命令硬拦截、写文件/命令默认弹窗请求确认；支持 default / Accept Edits / Plan / manual 四档权限模式（Shift+Tab 或 `/permission mode <name>` 切换）。
 
 ## Architecture
 
@@ -136,7 +136,8 @@ User Input
 
 ```text
 src/
-  agent/          # 单轮工具闭环与工具执行器
+  agent/          # 多轮 Agent Loop 与工具执行器
+  permissions/    # 权限流水线：危险命令、路径沙箱、规则引擎、模式矩阵
   config/         # YAML 配置加载与校验
   conversation/   # 对话、thinking、工具调用和工具结果
   prompt/         # 系统提示词与工具规则
@@ -164,9 +165,9 @@ pnpm.cmd dev
 
 - [x] 流式终端对话、Provider 抽象与多轮历史
 - [x] 本地工具、工具调用协议与单轮工具闭环
-- [ ] 多轮 Agent Loop、最大轮数与取消策略
-- [ ] 模块化 Prompt 和环境上下文
-- [ ] 权限确认、路径沙箱和危险命令控制
+- [x] 多轮 Agent Loop、最大轮数与取消策略
+- [x] 模块化 Prompt 和环境上下文
+- [x] 权限确认、路径沙箱和危险命令控制
 - [ ] MCP、上下文压缩、记忆、Slash Commands、Skills、Hooks
 - [ ] SubAgent、Worktree 与 Team Agent
 

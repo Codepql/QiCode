@@ -190,3 +190,198 @@ AbortController、AbortSignal、fetch
         ↓
 开始第一个开发阶段
 ```
+=======
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+# 第 01 章：QiCode 怎样把一句话交给 LLM
+
+> 🎓 学习目标：沿着一次真实提问，理解 QiCode 如何从终端输入走到模型请求，再回到终端显示。
+
+## 1. 全局地图 🗺️
+
+### 1.1 问题：我输入一句话后，代码从哪里开始执行？
+
+💡 原理：LLM 不在 QiCode 项目内部执行。QiCode 是客户端，负责收集问题、准备上下文、通过网络请求模型，再接收回复。
+
+~~~mermaid
+flowchart LR
+    U["👤 用户输入"] --> I["⌨️ InputBox"]
+    I --> A["🖥️ App.submit"]
+    A --> C["🧾 Conversation"]
+    A --> G["🧠 Agent.run"]
+    G --> P["🔌 Provider.stream"]
+    P --> L["☁️ OpenAI/Anthropic API"]
+    L --> P --> G --> A --> V["🖥️ ChatView"]
+~~~
+
+📍 入口是 [src/main.tsx](../../../../src/main.tsx)，界面在 [src/tui/app.tsx](../../../../src/tui/app.tsx)，Agent 在 [src/agent/agent.ts](../../../../src/agent/agent.ts)，LLM 通信在 [src/llm](../../../../src/llm)。
+
+🔮 下一个问题：项目连接哪个模型、地址和密钥，是不是写死在代码里？
+
+## 2. 配置：先描述模型服务 ⚙️
+
+### 2.1 问题：同一套 Agent 如何连接不同模型厂商？
+
+💡 原理：把经常变化的连接信息放进配置，把稳定逻辑留在代码里。ProviderConfig 定义在 [src/config/types.ts](../../../../src/config/types.ts:3)：
+
+~~~ts
+export interface ProviderConfig {
+  name: string;
+  protocol: "anthropic" | "openai";
+  model: string;
+  base_url: string;
+  api_key: string;
+  thinking: boolean;
+}
+~~~
+
+启动时 [src/main.tsx](../../../../src/main.tsx) 调用 loadConfig(configPath)，再把 config.providers 交给 App。一个 Provider 自动使用；多个 Provider 则由界面选择。
+
+🔮 下一个问题：配置只是数据，代码怎样根据 protocol 创建真正能发请求的对象？
+
+## 3. Provider：统一不同厂商的接口 🔌
+
+### 3.1 问题：OpenAI 和 Anthropic 的 HTTP 格式不同，App 要分别处理吗？
+
+💡 不应该。App 只需要“发起流式请求并接收事件”，不应知道不同厂商的认证头和 JSON 格式。因此项目定义统一 Provider 接口，位于 [src/llm/client.ts](../../../../src/llm/client.ts:12)：
+
+~~~ts
+export interface Provider {
+  readonly config: ProviderConfig;
+  stream(request: ChatRequest): AsyncIterable<StreamEvent>;
+}
+~~~
+
+createProvider() 根据协议选择 OpenAIProvider 或 AnthropicProvider。Agent 依赖的是这个接口，而不是某一家厂商，这就是面向接口编程。
+
+🔮 下一个问题：用户输入的文字怎样进入模型请求？
+
+## 4. Conversation：手动保存多轮历史 🧾
+
+### 4.1 问题：模型会自动记住上一轮聊天吗？
+
+💡 不会。每次 HTTP 请求都要带上需要的历史。Conversation 位于 [src/conversation/conversation.ts](../../../../src/conversation/conversation.ts)，用户提交时 App 执行：
+
+~~~ts
+conversationRef.current.addUserMessage(rawText);
+~~~
+
+它保存结构化消息：
+
+~~~ts
+{ role: "user", content: [{ type: "text", text: rawText }] }
+~~~
+
+Agent 调用 Provider 时取出完整历史：
+
+~~~ts
+messages: this.config.conversation.getMessages()
+~~~
+
+🔮 下一个问题：谁负责把历史、系统提示词和 Provider 组织成一次任务？
+
+## 5. Agent：协调一次请求 🧠
+
+### 5.1 问题：App 已有输入，为什么还需要 Agent？
+
+💡 App 负责界面状态；Agent 负责任务执行。提交后 [src/tui/app.tsx](../../../../src/tui/app.tsx:334) 创建 Agent：
+
+~~~ts
+const agent = new Agent({
+  provider: runtime.provider,
+  registry,
+  conversation: conversationRef.current,
+  systemPrompt: runtime.systemPrompt,
+  workDir,
+  abortSignal: controller.signal,
+  checker: new PermissionChecker(workDir, mode),
+});
+~~~
+
+Agent 在 [src/agent/agent.ts](../../../../src/agent/agent.ts:128) 调用 Provider，并使用 for await 持续接收事件：
+
+~~~ts
+for await (const event of this.config.provider.stream({
+  systemPrompt: this.config.systemPrompt,
+  messages: this.config.conversation.getMessages(),
+  tools,
+  signal: this.config.abortSignal,
+})) {
+  // 逐个处理模型事件
+}
+~~~
+
+🔮 下一个问题：为什么不是等完整答案返回，而是一个字一个字显示？
+
+## 6. 流式响应：让用户立即看到结果 📡
+
+### 6.1 问题：流式到底解决了什么？
+
+💡 完整等待会让界面长时间没有反馈。OpenAI Provider 在 [src/llm/openai.ts](../../../../src/llm/openai.ts:27) 使用 fetch 发送 POST /chat/completions，并带上模型、历史消息和 stream: true。Anthropic Provider 做相同工作，但请求格式不同。
+
+两个 Provider 都把厂商原始 SSE 翻译成统一 StreamEvent，定义在 [src/llm/events.ts](../../../../src/llm/events.ts)：
+
+~~~text
+text_delta：新增文本
+thinking_delta：新增思考内容
+tool_call_complete：模型请求调用工具
+usage：Token 统计
+done：输出结束
+~~~
+
+🔮 下一个问题：事件到达 App 后，怎样显示在终端？
+
+## 7. 从事件回到界面 🖥️
+
+### 7.1 问题：收到一段文本后，谁更新屏幕？
+
+💡 在 [src/tui/app.tsx](../../../../src/tui/app.tsx:368)，App 消费 Agent 事件：
+
+~~~ts
+if (event.type === "stream_text") {
+  setStreamingText((current) => current + event.text);
+  setStatus("streaming");
+}
+~~~
+
+完整接力是：模型文本 → Provider 的 text_delta → Agent 的 stream_text → App 更新 streamingText → ChatView 重新渲染。结束后，Agent 把助手消息写回 Conversation。
+
+## 8. 本章和 Agent 项目的关系 🎯
+
+### 8.1 问题：只有 LLM 通信，QiCode 已经是完整 Agent 吗？
+
+💡 还不完整。本章提供“大脑通信”：模型能理解问题并返回判断，但不能直接读文件、修改代码或执行命令。
+
+~~~mermaid
+flowchart LR
+    A["🧠 01 LLM"] --> B["🧰 02 Tools"] --> C["🔁 03 Loop"] --> D["💬 04 Prompt"] --> E["🔐 05 Permission"] --> F["🔌 06 MCP"]
+~~~
+
+MCP 不会替换 LLM；它只是把外部服务接入工具注册表，之后仍由 Agent 把工具说明交给模型、接收调用并回填结果。
+
+## 9. 面试表达 🎤
+
+### 9.1 问题：面试官问“你的 Agent 怎样调用模型”，怎么回答？
+
+💡 可以这样说：QiCode 启动时从 YAML 读取 Provider 配置，依据 protocol 创建 OpenAI 或 Anthropic Provider。用户提交消息后，App 把消息写入 Conversation 并创建 Agent；Agent 组合系统提示词、历史消息、工具定义和取消信号，调用统一的 Provider.stream()。具体 Provider 处理厂商 HTTP/SSE 差异并翻译成统一事件；App 消费事件并实时渲染，结束后把助手回复写回会话，从而支持多轮对话。
+
+这体现三个工程选择：配置与代码分离、Provider 抽象、流式事件统一。
+
+## 10. 自测与下一章 🔮
+
+### 10.1 问题：不看代码，你能回答吗？
+
+- 🧠 谁保存聊天历史？答案：Conversation。
+- 🔌 protocol 决定什么？答案：创建哪一种 Provider。
+- 📡 为什么返回 AsyncIterable<StreamEvent>？答案：边接收边显示，并隐藏厂商差异。
+- 🖥️ 为什么 App 不直接调用 API？答案：界面、任务协调和网络通信各负其责。
+- 🔮 下一章解决什么？答案：给只能思考的模型接入读文件、写文件和执行命令等工具。
+<<<<<<< ours
+<<<<<<< ours
+>>>>>>> theirs
+=======
+>>>>>>> theirs
+=======
+>>>>>>> theirs

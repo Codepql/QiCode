@@ -8,11 +8,15 @@ import { ToolRegistry } from "../../src/tools/registry.js";
 import type { Tool } from "../../src/tools/types.js";
 import { WriteFileTool } from "../../src/tools/write-file.js";
 
-function createFakeTool(name: string): Tool {
+function createFakeTool(
+  name: string,
+  options: { deferred?: boolean; description?: string } = {},
+): Tool {
   return {
     name,
-    description: `${name} description`,
+    description: options.description ?? `${name} description`,
     category: "read",
+    ...(options.deferred === undefined ? {} : { deferred: options.deferred }),
     schema: () => ({
       name,
       description: `${name} description`,
@@ -74,6 +78,53 @@ describe("ToolRegistry", () => {
 
   it("returns an empty list before tools are registered", () => {
     expect(new ToolRegistry().getAllSchemas()).toEqual([]);
+  });
+
+  it("hides deferred tools until they are discovered in both protocol shapes", () => {
+    const registry = new ToolRegistry();
+    registry.register(createFakeTool("Immediate"));
+    registry.register(createFakeTool("Deferred", { deferred: true }));
+
+    expect(registry.listToolsForModel().map((tool) => tool.name)).toEqual(["Immediate"]);
+    expect(registry.getAllSchemas("anthropic").map((schema) => schema["name"]))
+      .toEqual(["Immediate"]);
+    expect(registry.getAllSchemas("openai").map((schema) =>
+      (schema["function"] as Record<string, unknown>)["name"]
+    )).toEqual(["Immediate"]);
+
+    registry.markDiscovered("Deferred");
+
+    expect(registry.listToolsForModel().map((tool) => tool.name)).toEqual([
+      "Immediate",
+      "Deferred",
+    ]);
+    expect(registry.isDiscovered("Deferred")).toBe(true);
+  });
+
+  it("searches only undiscovered deferred tools by name or description", () => {
+    const registry = new ToolRegistry();
+    registry.register(createFakeTool("mcp__github__issues", {
+      deferred: true,
+      description: "Create and list work items",
+    }));
+    registry.register(createFakeTool("ImmediateGithub"));
+
+    expect(registry.getDeferredToolNames()).toEqual(["mcp__github__issues"]);
+    expect(registry.searchDeferred("GITHUB").map((tool) => tool.name)).toEqual([
+      "mcp__github__issues",
+    ]);
+    expect(registry.searchDeferred("work items").map((tool) => tool.name)).toEqual([
+      "mcp__github__issues",
+    ]);
+    expect(registry.findDeferredByNames([
+      "mcp__github__issues",
+      "ImmediateGithub",
+      "missing",
+    ]).map((tool) => tool.name)).toEqual(["mcp__github__issues"]);
+
+    registry.markDiscovered("mcp__github__issues");
+    expect(registry.getDeferredToolNames()).toEqual([]);
+    expect(registry.searchDeferred("github")).toEqual([]);
   });
 
   it("exports all six real tool definitions", () => {

@@ -58,6 +58,21 @@ export class Conversation {
     return this.#messages.map(cloneMessage);
   }
 
+  replaceWithCompacted(
+    summaryContent: string,
+    keep: readonly ConversationMessage[],
+  ): void {
+    if (summaryContent.trim() === "") {
+      throw new Error("Compacted summary must not be empty");
+    }
+
+    this.#messages.length = 0;
+    this.#messages.push({
+      role: "user",
+      content: [{ type: "text", text: summaryContent }],
+    }, ...keep.map(cloneMessage));
+  }
+
   clear(): void {
     this.#messages.length = 0;
   }

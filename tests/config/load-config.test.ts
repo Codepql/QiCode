@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   ConfigError,
   loadConfig,
+  loadConfigLayers,
+  loadMcpConfigLayers,
   resolveConfigPath,
 } from "../../src/config/load-config.js";
 
@@ -285,5 +287,88 @@ providers:
     await expect(loadConfig(path, {})).rejects.toThrow(
       "unsupported field: extra_field",
     );
+  });
+});
+
+describe("loadConfigLayers", () => {
+  async function writeLayer(
+    root: string,
+    relativePath: string,
+    contents: string,
+  ): Promise<void> {
+    const path = join(root, relativePath);
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(join(path, ".."), { recursive: true });
+    await writeFile(path, contents, "utf8");
+  }
+
+  it("does not load MCP configuration from provider config files", async () => {
+    const userRoot = await mkdtemp(join(tmpdir(), "qicode-home-"));
+    const workRoot = await mkdtemp(join(tmpdir(), "qicode-work-"));
+    temporaryDirectories.push(userRoot, workRoot);
+    const provider = `
+providers:
+  - name: main
+    protocol: anthropic
+    model: model
+    base_url: https://example.com
+    api_key: secret-value
+`;
+
+    await writeLayer(userRoot, ".QiCode/config.yaml", provider);
+    await writeLayer(workRoot, ".QiCode/config.yaml", provider);
+
+    const config = await loadConfigLayers(workRoot, userRoot, {});
+
+    expect(config.providers).toHaveLength(1);
+  });
+
+  it("skips missing provider layers", async () => {
+    const workRoot = await mkdtemp(join(tmpdir(), "qicode-work-"));
+    temporaryDirectories.push(workRoot);
+    await writeLayer(workRoot, ".QiCode/config.yaml", `
+providers:
+  - name: main
+    protocol: anthropic
+    model: model
+    base_url: https://example.com
+    api_key: secret-value
+`);
+
+    const config = await loadConfigLayers(
+      workRoot,
+      join(workRoot, "missing-home"),
+      {},
+    );
+
+    expect(config.providers).toHaveLength(1);
+  });
+});
+
+describe("loadMcpConfigLayers", () => {
+  it("merges MCP server files without expanding values", async () => {
+    const userRoot = await mkdtemp(join(tmpdir(), "qicode-home-"));
+    const workRoot = await mkdtemp(join(tmpdir(), "qicode-work-"));
+    temporaryDirectories.push(userRoot, workRoot);
+    const { mkdir } = await import("node:fs/promises");
+    const directory = join(workRoot, ".QiCode", "mcp-config");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "config.yaml"), `
+mcp_servers:
+  - name: github-$TOKEN
+    command: server-$TOKEN
+    args: ["--token", "$TOKEN"]
+    env:
+      TOKEN: "$TOKEN"
+`, "utf8");
+
+    const config = await loadMcpConfigLayers(workRoot, userRoot);
+
+    expect(config.mcp_servers).toEqual([{
+      name: "github-$TOKEN",
+      command: "server-$TOKEN",
+      args: ["--token", "$TOKEN"],
+      env: { TOKEN: "$TOKEN" },
+    }]);
   });
 });

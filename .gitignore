@@ -4,9 +4,10 @@ dist/
 coverage/
 *.log
 
-.QiCode/config.yaml
-.QiCode/config.local.yaml
+.QiCode/*
 config.local.yaml
 .env
 .env.*
 !.env.example
+
+.qicode/

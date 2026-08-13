@@ -47,7 +47,7 @@ describe("OpenAIProvider", () => {
     });
     expect(events).toEqual([
       { type: "text_delta", text: "hello" },
-      { type: "usage", inputTokens: 5, outputTokens: 2 },
+      { type: "usage", inputTokens: 5, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
       { type: "done", stopReason: "stop" },
     ]);
   });

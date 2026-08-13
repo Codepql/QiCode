@@ -20,6 +20,7 @@
   "license": "MIT",
   "packageManager": "pnpm@10.14.0",
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
     "chalk": "^6.0.0",
     "fast-glob": "^3.3.3",
     "ink": "^7.1.1",

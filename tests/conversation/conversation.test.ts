@@ -211,4 +211,22 @@ describe("Conversation", () => {
 
     expect(conversation.getMessages()).toEqual([]);
   });
+
+  it("replaces old history with a summary and cloned recent messages", () => {
+    const conversation = new Conversation();
+    conversation.addUserMessage("old task");
+    conversation.addAssistantMessage([{ type: "text", text: "old answer" }]);
+    const keep: ConversationMessage[] = [{
+      role: "user",
+      content: [{ type: "text", text: "recent task" }],
+    }];
+
+    conversation.replaceWithCompacted("summary", keep);
+    keep[0]!.content[0] = { type: "text", text: "mutated outside" };
+
+    expect(conversation.getMessages()).toEqual([
+      { role: "user", content: [{ type: "text", text: "summary" }] },
+      { role: "user", content: [{ type: "text", text: "recent task" }] },
+    ]);
+  });
 });
