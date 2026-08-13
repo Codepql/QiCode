@@ -7,6 +7,10 @@ import type { MCPServerConfig, ProviderConfig } from "../config/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import type { ConversationMessage } from "../conversation/types.js";
 import { createProvider, formatProviderError, type Provider } from "../llm/client.js";
+import { loadInstructions } from "../memory/instructions.js";
+import { MemoryManager } from "../memory/manager.js";
+import { MemoryExtractor } from "../memory/extractor.js";
+import { FileHistory } from "../filehistory/filehistory.js";
 import { buildSystemPrompt, detectEnvironment } from "../prompt/builder.js";
 import {
   buildPlanModeExitReminder,
@@ -16,7 +20,15 @@ import {
 } from "../prompt/plan-mode.js";
 import type { EnvironmentContext } from "../prompt/sections.js";
 import { PermissionChecker, type PermissionMode } from "../permissions/checker.js";
-import { saveCompactBoundary } from "../session/session.js";
+import {
+  listSessions,
+  loadSession,
+  newSessionId,
+  rebuildFromSession,
+  saveCompactBoundary,
+  saveMessage,
+  cleanExpiredSessions,
+} from "../session/session.js";
 import { MCPManager } from "../mcp/manager.js";
 import { MCPToolWrapper } from "../mcp/tool-wrapper.js";
 import { BashTool } from "../tools/bash.js";
@@ -61,7 +73,6 @@ export type RuntimeFactory = (
 type ProviderFactory = (config: ProviderConfig) => Promise<Provider>;
 type EnvironmentDetector = (workDir: string) => Promise<EnvironmentContext>;
 const createMcpManager = (): MCPManager => new MCPManager();
-const createSessionId = (): string => `session_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
 export async function initializeAgentRuntime(
   config: ProviderConfig,
@@ -113,7 +124,12 @@ export function App({
   const [startedAt, setStartedAt] = useState(Date.now());
   const conversationRef = useRef(new Conversation());
   const recoveryStateRef = useRef(new RecoveryState());
-  const sessionIdRef = useRef(createSessionId());
+  const sessionIdRef = useRef(newSessionId());
+  const mcpInstructionsRef = useRef<string[]>([]);
+  const memoryExtractorRef = useRef<MemoryExtractor | null>(null);
+  const memoryCursorRef = useRef(0);
+  const memoryExtractingRef = useRef(false);
+  const fileHistoryRef = useRef<FileHistory | null>(null);
   const registryRef = useRef<ToolRegistry | null>(null);
   const mcpManagerRef = useRef<MCPManager | null>(null);
   const mcpManagerFactoryRef = useRef(mcpManagerFactory);
@@ -140,6 +156,17 @@ export function App({
     (permissionRequest !== null ? 8 : 0);
   const chatMaxHeight = Math.max(4, (stdout.rows ?? 24) - chatChromeRows);
 
+  useEffect(() => {
+    injectDurableContext(conversationRef.current, workDir);
+    try {
+      fileHistoryRef.current = new FileHistory(workDir, sessionIdRef.current);
+    } catch {
+      fileHistoryRef.current = null;
+    }
+    void Promise.resolve().then(() => cleanExpiredSessions(workDir)).catch(() => {});
+    setMessages(conversationRef.current.getMessages());
+  }, [workDir]);
+
   useEffect(() => () => {
     abortRef.current?.abort();
     if (exitHintTimerRef.current) clearTimeout(exitHintTimerRef.current);
@@ -162,9 +189,8 @@ export function App({
         }
       }
       for (const instruction of result.instructions) {
-        conversationRef.current.addSystemReminder(
-          `# MCP Server: ${instruction.serverName}\n${instruction.text}`,
-        );
+        mcpInstructionsRef.current.push(`# MCP Server: ${instruction.serverName}\n${instruction.text}`);
+        conversationRef.current.addSystemReminder(mcpInstructionsRef.current.at(-1)!);
       }
       if (result.errors.length > 0) {
         setMcpNotice(
@@ -282,11 +308,26 @@ export function App({
       setMode("default");
       return;
     }
+    const memoryMatch = command.match(/^\/memory(?:\s+(.+))?$/);
+    if (memoryMatch) {
+      void handleMemoryCommand(memoryMatch[1]?.trim());
+      return;
+    }
     if (command === "/mcp") {
       const currentMcpInfo = mcpInfoRef.current;
       setMcpNotice(currentMcpInfo.servers.length === 0
         ? "No MCP servers connected."
         : `MCP servers (${currentMcpInfo.servers.length}): ${currentMcpInfo.servers.join(", ")}\nTools: ${currentMcpInfo.toolCount} total`);
+      return;
+    }
+    const rewindMatch = command.match(/^\/rewind(?:\s+(\d+))?$/);
+    if (rewindMatch) {
+      handleRewind(rewindMatch[1] === undefined ? undefined : Number(rewindMatch[1]));
+      return;
+    }
+    const resumeMatch = command.match(/^\/resume(?:\s+(.+))?$/);
+    if (resumeMatch) {
+      resumeSession(resumeMatch[1]?.trim());
       return;
     }
     if (command === "/compact" || command === "/c") {
@@ -333,7 +374,9 @@ export function App({
       return;
     }
 
+    const checkpointMessageIndex = conversationRef.current.getMessages().length;
     conversationRef.current.addUserMessage(rawText);
+    persistSessionMessage("user", rawText);
     setMessages(conversationRef.current.getMessages());
     setStreamingText("");
     setActiveTools([]);
@@ -357,6 +400,9 @@ export function App({
         ?? startRuntime(runtimeFactory, config, workDir);
       runtimeRef.current = runtimePromise;
       const runtime = await runtimePromise;
+      if (memoryExtractorRef.current === null) {
+        memoryExtractorRef.current = new MemoryExtractor(runtime.provider, workDir);
+      }
       const registry = registryRef.current!;
       const agent = new Agent({
         provider: runtime.provider,
@@ -369,6 +415,7 @@ export function App({
         recoveryState: recoveryStateRef.current,
         contextWindow: contextWindowFor(config),
         maxOutput: 8_192,
+        ...(fileHistoryRef.current === null ? {} : { fileHistory: fileHistoryRef.current }),
         onPermissionRequest: async (toolName, args, decision) => {
           return new Promise<PermissionAction>((resolve) => {
             let settled = false;
@@ -424,6 +471,14 @@ export function App({
         } else if (event.type === "turn_complete") {
           setMessages(conversationRef.current.getMessages());
           setStreamingText("");
+        } else if (event.type === "loop_complete") {
+          if (!agentFailed && !controller.signal.aborted) {
+            persistFinalAssistantMessage();
+            if (fileHistoryRef.current?.hasPendingChanges()) {
+              fileHistoryRef.current.makeSnapshot(checkpointMessageIndex, rawText);
+            }
+            triggerMemoryExtraction(runtime.provider);
+          }
         } else if (event.type === "usage") {
           if (event.inputTokens !== undefined) {
             setInputTokens((current) => (current ?? 0) + event.inputTokens!);
@@ -453,6 +508,167 @@ export function App({
       setActiveTools([]);
       setIteration(undefined);
       setExitHint("");
+    }
+  }
+
+  function persistSessionMessage(role: "user" | "assistant", content: string): void {
+    try {
+      saveMessage(workDir, sessionIdRef.current, {
+        role,
+        content,
+        timestamp: new Date().toISOString(),
+      });
+    } catch {
+      // Session persistence is optional; an I/O failure must not interrupt a turn.
+    }
+  }
+
+  function persistFinalAssistantMessage(): void {
+    const lastMessage = conversationRef.current.getMessages().at(-1);
+    if (lastMessage?.role !== "assistant") return;
+
+    const content = Conversation.visibleText(lastMessage);
+    if (content.trim() !== "") persistSessionMessage("assistant", content);
+  }
+
+  function triggerMemoryExtraction(provider: Provider): void {
+    const conversation = conversationRef.current.getMessages();
+    if (conversation.length - memoryCursorRef.current < 2) return;
+    const cursor = conversation.length;
+    const summary = conversation
+      .slice(Math.max(0, conversation.length - 40))
+      .map((message) => `${message.role}: ${Conversation.visibleText(message)}`)
+      .filter((line) => line.length >= 12)
+      .join("\n")
+      .slice(-40_000);
+    if (summary.trim() === "") return;
+
+    const extractor = memoryExtractorRef.current ?? new MemoryExtractor(provider, workDir);
+    memoryExtractorRef.current = extractor;
+    const isPending = extractor.isRunning;
+    if (!isPending) memoryExtractingRef.current = true;
+    void extractor.extract(summary)
+      .then((saved) => {
+        if (!isPending) memoryCursorRef.current = cursor;
+        if (saved.length > 0) setCompactNotice(`Memory saved: ${saved.join(", ")}`);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!isPending) memoryExtractingRef.current = false;
+      });
+  }
+
+  async function handleMemoryCommand(query: string | undefined): Promise<void> {
+    const manager = new MemoryManager(workDir);
+    if (query === undefined || query === "") {
+      const memories = manager.getMemories();
+      setCompactNotice(memories.length === 0
+        ? "No durable memories found."
+        : [
+            `Memory index: ${memories.length} entries`,
+            `Project: ${manager.projectDir}`,
+            `User: ${manager.userDir}`,
+            ...memories.map((memory) => `- ${memory.name} (${memory.type}): ${memory.description}`),
+          ].join("\n"));
+      return;
+    }
+
+    const runtime = runtimeRef.current;
+    if (runtime === undefined) {
+      setCompactNotice("Provider is not ready for memory search.");
+      return;
+    }
+    try {
+      const selected = await manager.findRelevantMemories(query, (await runtime).provider);
+      if (selected.length === 0) {
+        setCompactNotice(`No relevant memories found for: ${query}`);
+        return;
+      }
+      const selectedPaths = new Set(selected.map((memory) => memory.path));
+      const entries = manager.getMemories().filter((memory) => selectedPaths.has(memory.path));
+      conversationRef.current.addSystemReminder(
+        `Relevant memories for "${query}":\n${entries.map((memory) => (
+          `## ${memory.name}\n${memory.content.trim()}`
+        )).join("\n\n")}`,
+      );
+      setMessages(conversationRef.current.getMessages());
+      setCompactNotice(`Loaded ${entries.length} relevant memor${entries.length === 1 ? "y" : "ies"}.`);
+    } catch {
+      setCompactNotice("Memory search failed.");
+    }
+  }
+
+  function handleRewind(snapshotIndex: number | undefined): void {
+    const history = fileHistoryRef.current;
+    if (history === null || !history.hasSnapshots()) {
+      setCompactNotice("No checkpoints to rewind to.");
+      return;
+    }
+    const snapshots = history.getSnapshots();
+    if (snapshotIndex === undefined) {
+      setCompactNotice([
+        "Checkpoints (use /rewind <index> to restore):",
+        ...snapshots.map((snapshot, index) => `  ${index}: ${snapshot.label}`),
+      ].join("\n"));
+      return;
+    }
+    if (!Number.isInteger(snapshotIndex) || snapshotIndex < 0 || snapshotIndex >= snapshots.length) {
+      setCompactNotice(`Unknown checkpoint index: ${snapshotIndex}`);
+      return;
+    }
+    const snapshot = snapshots[snapshotIndex]!;
+    const changed = history.rewind(snapshotIndex);
+    conversationRef.current.truncateTo(snapshot.messageIndex);
+    setMessages(conversationRef.current.getMessages());
+    setCompactNotice(`Rewound to checkpoint ${snapshotIndex}. Restored ${changed.length} file(s).`);
+  }
+
+  function resumeSession(sessionId: string | undefined): void {
+    if (sessionId === undefined || sessionId === "") {
+      const sessions = listSessions(workDir).slice(0, 10);
+      setCompactNotice(sessions.length === 0
+        ? "No sessions found."
+        : `Sessions (use /resume <id> to restore):\n${sessions.map((session) => (
+          `  ${session.id} (${session.messageCount} messages) - ${session.firstMessage}`
+        )).join("\n")}`);
+      return;
+    }
+
+    try {
+      const saved = loadSession(workDir, sessionId);
+      if (saved.length === 0) {
+        setCompactNotice(`Session "${sessionId}" not found or empty.`);
+        return;
+      }
+
+      const restored = rebuildFromSession(saved);
+      const conversation = new Conversation();
+      injectDurableContext(conversation, workDir);
+      const durableContext = conversation.getMessages();
+      const mcpReminders = mcpInstructionsRef.current.map((instruction) => ({
+        role: "user" as const,
+        content: [{
+          type: "text" as const,
+          text: `<system-reminder>\n${instruction}\n</system-reminder>`,
+        }],
+      }));
+      conversation.restoreMessages(restored, [...durableContext, ...mcpReminders]);
+
+      conversationRef.current = conversation;
+      recoveryStateRef.current = new RecoveryState();
+      sessionIdRef.current = sessionId;
+      try {
+        fileHistoryRef.current = new FileHistory(workDir, sessionId);
+      } catch {
+        fileHistoryRef.current = null;
+      }
+      setMessages(conversation.getMessages());
+      setStreamingText("");
+      setActiveTools([]);
+      setErrorMessage("");
+      setCompactNotice(`Resumed session ${sessionId} (${restored.length} messages).`);
+    } catch {
+      setCompactNotice(`Session "${sessionId}" could not be restored.`);
     }
   }
 
@@ -494,6 +710,17 @@ export function App({
       </Box>
     </Box>
   );
+}
+
+function injectDurableContext(conversation: Conversation, workDir: string): void {
+  try {
+    conversation.injectLongTermMemory(
+      loadInstructions(workDir),
+      new MemoryManager(workDir).buildSystemReminder(),
+    );
+  } catch {
+    // Durable context is best effort and must not block normal chat startup.
+  }
 }
 
 function sanitizeMcpError(message: string): string {

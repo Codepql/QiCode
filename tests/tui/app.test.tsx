@@ -69,14 +69,16 @@ describe("App", () => {
     view.stdin.write("first");
     await waitFor(() => (view.lastFrame() ?? "").includes("first"));
     view.stdin.write("\r");
-    await waitFor(() => requests.length === 1);
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "stable-system-prompt").length === 1);
     view.stdin.write("second");
     await waitFor(() => (view.lastFrame() ?? "").includes("second"));
     view.stdin.write("\r");
-    await waitFor(() => requests.length === 2);
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "stable-system-prompt").length === 2);
 
     expect(runtimeFactory).toHaveBeenCalledTimes(1);
-    expect(requests.map((request) => request.systemPrompt)).toEqual([
+    expect(requests
+      .filter((request) => request.systemPrompt === "stable-system-prompt")
+      .map((request) => request.systemPrompt)).toEqual([
       "stable-system-prompt",
       "stable-system-prompt",
     ]);
@@ -139,12 +141,13 @@ describe("App", () => {
     view.stdin.write("hello");
     await waitFor(() => (view.lastFrame() ?? "").includes("hello"));
     view.stdin.write("\r");
-    await waitFor(() => requests.length === 1);
-    expect(requests[0]?.tools?.map((tool) => tool.name)).toContain("ToolSearch");
-    expect(requests[0]?.tools?.map((tool) => tool.name)).not.toContain(
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "system").length === 1);
+    const agentRequest = requests.find((request) => request.systemPrompt === "system");
+    expect(agentRequest?.tools?.map((tool) => tool.name)).toContain("ToolSearch");
+    expect(agentRequest?.tools?.map((tool) => tool.name)).not.toContain(
       "mcp__github__create_issue",
     );
-    expect(requests[0]?.messages.some((message) =>
+    expect(agentRequest?.messages.some((message) =>
       message.content.some((block) =>
         block.type === "text" && block.text.includes("# MCP Server: github")
       )
@@ -183,8 +186,9 @@ describe("App", () => {
     view.stdin.write("hello");
     await waitFor(() => (view.lastFrame() ?? "").includes("hello"));
     view.stdin.write("\r");
-    await waitFor(() => requests.length === 1);
-    expect(JSON.stringify(requests[0]?.messages)).not.toContain("offline");
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "system").length === 1);
+    const agentRequest = requests.find((request) => request.systemPrompt === "system");
+    expect(JSON.stringify(agentRequest?.messages)).not.toContain("offline");
     view.unmount();
   });
 });

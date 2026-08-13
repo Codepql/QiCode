@@ -212,6 +212,18 @@ describe("Conversation", () => {
     expect(conversation.getMessages()).toEqual([]);
   });
 
+  it("injects durable context once and can truncate a reverted turn", () => {
+    const conversation = new Conversation();
+    conversation.injectLongTermMemory("Use pnpm", "Active memories:\n- [tone] (user): Chinese");
+    conversation.injectLongTermMemory("ignored", "ignored");
+    conversation.addUserMessage("change file");
+    conversation.addAssistantMessage([{ type: "text", text: "done" }]);
+    conversation.truncateTo(1);
+
+    expect(conversation.getMessages()).toHaveLength(1);
+    expect(Conversation.visibleText(conversation.getMessages()[0]!)).toContain("Use pnpm");
+  });
+
   it("replaces old history with a summary and cloned recent messages", () => {
     const conversation = new Conversation();
     conversation.addUserMessage("old task");

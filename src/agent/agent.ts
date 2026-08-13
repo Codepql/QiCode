@@ -15,6 +15,7 @@ import type {
   ToolUseBlock,
 } from "../conversation/types.js";
 import { ContextTooLongError, type Provider } from "../llm/client.js";
+import type { FileHistory } from "../filehistory/filehistory.js";
 import type { StreamEvent, ToolDefinition } from "../llm/events.js";
 import {
   buildPlanModeReminder,
@@ -48,6 +49,7 @@ export interface AgentConfig {
   maxIterations?: number;
   contextWindow?: number;
   maxOutput?: number;
+  fileHistory?: FileHistory;
   recoveryState?: RecoveryState;
   replacementState?: ContentReplacementState;
   checker: PermissionChecker;
@@ -379,6 +381,11 @@ export class Agent {
           checker.allowAlways(toolUse.name, toolUse.input);
         }
         // allow / allowAlways 都落到正常执行路径
+      }
+
+      if ((toolUse.name === "WriteFile" || toolUse.name === "EditFile")
+        && typeof toolUse.input.file_path === "string") {
+        this.config.fileHistory?.trackEdit(toolUse.input.file_path);
       }
 
       executor.submit(toolUse.id, toolUse.name, toolUse.input);
