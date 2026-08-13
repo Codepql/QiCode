@@ -171,11 +171,6 @@ export function App({
       };
       mcpInfoRef.current = info;
       setMcpInfo(info);
-      if (result.servers.length > 0) {
-        setMcpNotice(
-          `MCP servers (${result.servers.length}): ${result.servers.join(", ")}\nTools: ${result.tools.length} total`,
-        );
-      }
     });
 
     return () => {
@@ -279,7 +274,7 @@ export function App({
       setMode("default");
       return;
     }
-    if (command === "/mcp" || command === "/status") {
+    if (command === "/mcp") {
       const currentMcpInfo = mcpInfoRef.current;
       setMcpNotice(currentMcpInfo.servers.length === 0
         ? "No MCP servers connected."
@@ -446,7 +441,6 @@ export function App({
       <Box marginTop={1} flexDirection="column">
         <InputBox
           disabled={busy || permissionRequest !== null}
-          permMode={mode}
           onSubmit={(value) => void submit(value)}
         />
         <StatusBar

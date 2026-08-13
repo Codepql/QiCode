@@ -3,13 +3,6 @@ import { useEffect, useState } from "react";
 import type { PermissionMode } from "../permissions/checker.js";
 import { sanitizeTerminalText } from "./sanitize-terminal.js";
 
-const MODE_DISPLAY: Record<string, { name: string; color: string }> = {
-  default: { name: "default", color: "gray" },
-  acceptEdits: { name: "Accept Edits", color: "green" },
-  plan: { name: "Plan", color: "yellow" },
-  bypassPermissions: { name: "manual", color: "red" },
-};
-
 export interface InputBoxProps {
   disabled?: boolean;
   columns?: number;
@@ -17,7 +10,7 @@ export interface InputBoxProps {
   onSubmit(value: string): void;
 }
 
-export function InputBox({ disabled = false, columns, permMode, onSubmit }: InputBoxProps) {
+export function InputBox({ disabled = false, columns, onSubmit }: InputBoxProps) {
   const [value, setValue] = useState("");
   const [cursor, setCursor] = useState(0);
 
@@ -68,16 +61,8 @@ export function InputBox({ disabled = false, columns, permMode, onSubmit }: Inpu
   const atCursor = sanitizeTerminalText(value[cursor] ?? " ");
   const after = sanitizeTerminalText(value.slice(cursor + 1));
 
-  const modeInfo = permMode === undefined ? undefined : MODE_DISPLAY[permMode];
-
   return (
     <Box flexDirection="column">
-      {modeInfo !== undefined && permMode !== "default" && (
-        <Text>
-          <Text color={modeInfo.color}>{modeInfo.name} on </Text>
-          <Text dimColor>(shift+tab to cycle)</Text>
-        </Text>
-      )}
       <Box
         flexDirection="row"
         marginRight={1}
