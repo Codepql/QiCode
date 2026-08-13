@@ -1,6 +1,8 @@
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { useEffect, useRef, useState } from "react";
 import { Agent } from "../agent/agent.js";
+import { forceCompact } from "../compact/compact.js";
+import { RecoveryState } from "../compact/recovery.js";
 import type { MCPServerConfig, ProviderConfig } from "../config/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import type { ConversationMessage } from "../conversation/types.js";
@@ -14,6 +16,7 @@ import {
 } from "../prompt/plan-mode.js";
 import type { EnvironmentContext } from "../prompt/sections.js";
 import { PermissionChecker, type PermissionMode } from "../permissions/checker.js";
+import { saveCompactBoundary } from "../session/session.js";
 import { MCPManager } from "../mcp/manager.js";
 import { MCPToolWrapper } from "../mcp/tool-wrapper.js";
 import { BashTool } from "../tools/bash.js";
@@ -58,6 +61,7 @@ export type RuntimeFactory = (
 type ProviderFactory = (config: ProviderConfig) => Promise<Provider>;
 type EnvironmentDetector = (workDir: string) => Promise<EnvironmentContext>;
 const createMcpManager = (): MCPManager => new MCPManager();
+const createSessionId = (): string => `session_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
 export async function initializeAgentRuntime(
   config: ProviderConfig,
@@ -108,6 +112,8 @@ export function App({
   const [iteration, setIteration] = useState<number>();
   const [startedAt, setStartedAt] = useState(Date.now());
   const conversationRef = useRef(new Conversation());
+  const recoveryStateRef = useRef(new RecoveryState());
+  const sessionIdRef = useRef(createSessionId());
   const registryRef = useRef<ToolRegistry | null>(null);
   const mcpManagerRef = useRef<MCPManager | null>(null);
   const mcpManagerFactoryRef = useRef(mcpManagerFactory);
@@ -123,11 +129,13 @@ export function App({
   }>({ servers: [], toolCount: 0, failedServerCount: 0 });
   const mcpInfoRef = useRef(mcpInfo);
   const [mcpNotice, setMcpNotice] = useState("");
+  const [compactNotice, setCompactNotice] = useState("");
   if (registryRef.current === null) registryRef.current = createToolRegistry();
   const busy = status === "waiting" || status === "streaming";
   const chatChromeRows =
     8 +
     (errorMessage !== "" ? 1 : 0) +
+    (compactNotice !== "" ? 1 : 0) +
     (exitHint !== "" ? 1 : 0) +
     (permissionRequest !== null ? 8 : 0);
   const chatMaxHeight = Math.max(4, (stdout.rows ?? 24) - chatChromeRows);
@@ -281,6 +289,31 @@ export function App({
         : `MCP servers (${currentMcpInfo.servers.length}): ${currentMcpInfo.servers.join(", ")}\nTools: ${currentMcpInfo.toolCount} total`);
       return;
     }
+    if (command === "/compact" || command === "/c") {
+      if (busy) return;
+      setCompactNotice("");
+      try {
+        const runtimePromise = runtimeRef.current
+          ?? startRuntime(runtimeFactory, config, workDir);
+        runtimeRef.current = runtimePromise;
+        const runtime = await runtimePromise;
+        const result = await forceCompact(
+          conversationRef.current,
+          runtime.provider,
+          recoveryStateRef.current,
+          registryRef.current!.listTools().map((tool) => tool.name),
+        );
+        if (result.boundary !== undefined) {
+          saveCompactBoundary(workDir, sessionIdRef.current, result.boundary);
+        }
+        setMessages(conversationRef.current.getMessages());
+        setCompactNotice(result.message);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setCompactNotice(`Compaction failed: ${message}`);
+      }
+      return;
+    }
     if (command.startsWith("/permission")) {
       const modes: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
       const parts = command.slice("/permission".length).trim().split(/\s+/).filter(Boolean);
@@ -333,6 +366,9 @@ export function App({
         workDir,
         abortSignal: controller.signal,
         checker: new PermissionChecker(workDir, mode),
+        recoveryState: recoveryStateRef.current,
+        contextWindow: contextWindowFor(config),
+        maxOutput: 8_192,
         onPermissionRequest: async (toolName, args, decision) => {
           return new Promise<PermissionAction>((resolve) => {
             let settled = false;
@@ -363,6 +399,12 @@ export function App({
         if (event.type === "iteration_start") {
           setIteration(event.iteration);
           setStatus("streaming");
+        } else if (event.type === "compact") {
+          if (event.boundary !== undefined) {
+            saveCompactBoundary(workDir, sessionIdRef.current, event.boundary);
+          }
+          setMessages(conversationRef.current.getMessages());
+          setCompactNotice(event.message);
         } else if (event.type === "stream_text") {
           setStreamingText((current) => current + event.text);
           setStatus("streaming");
@@ -424,6 +466,7 @@ export function App({
         startedAt={startedAt}
       />
       {errorMessage && <Text color="red">Error: {errorMessage}</Text>}
+      {compactNotice && <Text color="cyan">{compactNotice}</Text>}
       {mcpNotice && <Text color="yellow">{mcpNotice}</Text>}
       {exitHint && <Text color="yellow">{exitHint}</Text>}
       {permissionRequest && (
@@ -479,4 +522,8 @@ function createToolRegistry(): ToolRegistry {
   registry.register(new GrepTool());
   registry.register(new ToolSearchTool(registry));
   return registry;
+}
+
+function contextWindowFor(config: ProviderConfig): number {
+  return config.protocol === "anthropic" ? 200_000 : 128_000;
 }

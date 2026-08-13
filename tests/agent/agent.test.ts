@@ -97,7 +97,7 @@ describe("Agent", () => {
     expect(Conversation.visibleText(conversation.getMessages().at(-1)!)).toBe("partial");
   });
 
-  it("truncates tool output before returning it and saving it", async () => {
+  it("keeps complete tool output in history before request budgeting", async () => {
     const provider = new FakeProvider([
       [toolCall("large", "ReadFile"), { type: "done" }],
       [{ type: "done" }],
@@ -109,8 +109,9 @@ describe("Agent", () => {
     const events = await collect(agent(provider, registry, conversation));
 
     const result = events.find((event) => event.type === "tool_result");
-    expect(result).toMatchObject({ type: "tool_result", output: expect.stringContaining("[工具输出已截断]") });
-    if (result?.type === "tool_result") expect(result.output).toHaveLength(MAX_TOOL_OUTPUT_CHARS);
+    if (result?.type === "tool_result") {
+      expect(result.output).toHaveLength(MAX_TOOL_OUTPUT_CHARS + 100);
+    }
   });
 
   it("runs adjacent read tools together before a write tool", async () => {

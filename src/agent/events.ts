@@ -1,5 +1,8 @@
+import type { CompactBoundaryPayload } from "../session/session.js";
+
 export type AgentEvent =
   | { type: "iteration_start"; iteration: number }
+  | { type: "compact"; message: string; boundary?: CompactBoundaryPayload }
   | { type: "stream_text"; text: string }
   | { type: "thinking_text"; thinking: string }
   | { type: "thinking_complete"; thinking: string; signature: string }

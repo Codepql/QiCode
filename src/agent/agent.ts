@@ -1,3 +1,12 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import {
+  AutoCompactTrackingState,
+  forceCompact,
+  manageContext,
+  type UsageAnchor,
+} from "../compact/compact.js";
+import { RecoveryState } from "../compact/recovery.js";
 import { Conversation } from "../conversation/conversation.js";
 import type {
   ConversationBlock,
@@ -5,7 +14,7 @@ import type {
   ToolResultBlock,
   ToolUseBlock,
 } from "../conversation/types.js";
-import type { Provider } from "../llm/client.js";
+import { ContextTooLongError, type Provider } from "../llm/client.js";
 import type { StreamEvent, ToolDefinition } from "../llm/events.js";
 import {
   buildPlanModeReminder,
@@ -18,12 +27,15 @@ import {
 } from "../permissions/checker.js";
 import { ToolRegistry } from "../tools/registry.js";
 import type { ToolCategory } from "../tools/types.js";
+import { applyBudget } from "../toolresult/budget.js";
+import { buildConversation } from "../toolresult/reconstruct.js";
+import { ContentReplacementState } from "../toolresult/state.js";
 import { StreamingExecutor } from "./streaming-executor.js";
 import type { AgentEvent } from "./events.js";
 
-// Keep one tool result from consuming an unbounded amount of model context.
-export const MAX_TOOL_OUTPUT_CHARS = 10_000;
 export const DEFAULT_MAX_ITERATIONS = 20;
+// Kept temporarily for existing consumers; runtime output budgeting is now in toolresult/budget.
+export const MAX_TOOL_OUTPUT_CHARS = 10_000;
 const MAX_CONSECUTIVE_UNKNOWN_TOOL_TURNS = 3;
 
 export interface AgentConfig {
@@ -34,6 +46,10 @@ export interface AgentConfig {
   workDir: string;
   abortSignal?: AbortSignal;
   maxIterations?: number;
+  contextWindow?: number;
+  maxOutput?: number;
+  recoveryState?: RecoveryState;
+  replacementState?: ContentReplacementState;
   checker: PermissionChecker;
   onPermissionRequest?: (
     toolName: string,
@@ -46,16 +62,23 @@ export class Agent {
   readonly #readFiles = new Set<string>();
   readonly #checker: PermissionChecker;
   readonly #onPermissionRequest: AgentConfig["onPermissionRequest"];
+  readonly #compactTracking = new AutoCompactTrackingState();
+  readonly #recoveryState: RecoveryState;
+  readonly #replacementState: ContentReplacementState;
+  #usageAnchor: UsageAnchor | null = null;
 
   constructor(private readonly config: AgentConfig) {
     this.#checker = config.checker;
     this.#onPermissionRequest = config.onPermissionRequest;
+    this.#recoveryState = config.recoveryState ?? new RecoveryState();
+    this.#replacementState = config.replacementState ?? new ContentReplacementState();
   }
 
   async *run(): AsyncGenerator<AgentEvent> {
     const maxIterations = this.config.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     const checker = this.#checker;
     let consecutiveUnknownToolTurns = 0;
+    let contextRecoveryAttempted = false;
 
     for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
       if (this.config.abortSignal?.aborted) {
@@ -64,6 +87,25 @@ export class Agent {
       }
 
       yield { type: "iteration_start", iteration };
+      const compactResult = await manageContext(
+        this.config.conversation,
+        this.config.provider,
+        this.config.contextWindow ?? 200_000,
+        this.config.maxOutput ?? 8_192,
+        this.#compactTracking,
+        this.#recoveryState,
+        this.config.registry.listTools().map((tool) => tool.name),
+        this.#usageAnchor,
+      );
+      if (compactResult.message !== "") {
+        yield {
+          type: "compact",
+          message: compactResult.message,
+          ...(compactResult.boundary === undefined ? {} : { boundary: compactResult.boundary }),
+        };
+      }
+      if (compactResult.compacted) this.#usageAnchor = null;
+
       if (checker.mode === "plan") {
         const planPath = getPlanPath(this.config.workDir);
         this.config.conversation.addSystemReminder(
@@ -76,9 +118,43 @@ export class Agent {
       }
       const response = createCollectedResponse();
       const tools = toolDefinitions(this.config.registry, checker);
-      const streamCompleted = yield* this.streamResponse(response, tools);
+      const streamResult = yield* this.streamResponse(response, tools);
 
-      if (!streamCompleted || this.config.abortSignal?.aborted) {
+      if (streamResult === "context_too_long") {
+        if (contextRecoveryAttempted) {
+          yield { type: "error", message: "Conversation context remains too long after recovery." };
+          yield { type: "loop_complete", stopReason: "context_too_long" };
+          return;
+        }
+        contextRecoveryAttempted = true;
+        try {
+          const result = await forceCompact(
+            this.config.conversation,
+            this.config.provider,
+            this.#recoveryState,
+            this.config.registry.listTools().map((tool) => tool.name),
+          );
+          this.#usageAnchor = null;
+          yield {
+            type: "compact",
+            message: `Compacted after context-length error: ${result.message}`,
+            ...(result.boundary === undefined ? {} : { boundary: result.boundary }),
+          };
+          if (!result.compacted) {
+            yield { type: "error", message: "Conversation context is too long and no history can be compacted." };
+            yield { type: "loop_complete", stopReason: "context_too_long" };
+            return;
+          }
+          continue;
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          yield { type: "error", message: `Context recovery failed: ${message}` };
+          yield { type: "loop_complete", stopReason: "context_too_long" };
+          return;
+        }
+      }
+
+      if (streamResult !== "completed" || this.config.abortSignal?.aborted) {
         // An unfinished tool request must not be kept in history without a result.
         this.commitAssistant(response, false);
         yield {
@@ -123,25 +199,35 @@ export class Agent {
   private async *streamResponse(
     response: CollectedResponse,
     tools: ToolDefinition[],
-  ): AsyncGenerator<AgentEvent, boolean> {
+  ): AsyncGenerator<AgentEvent, "completed" | "failed" | "context_too_long"> {
+    const messages = this.config.conversation.getMessages();
+    const apiConversation = buildConversation(
+      applyBudget(messages, this.config.workDir, this.#replacementState),
+    );
+    const sentMessageCount = messages.length;
     try {
       for await (const event of this.config.provider.stream({
         systemPrompt: this.config.systemPrompt,
-        messages: this.config.conversation.getMessages(),
+        messages: apiConversation.getMessages(),
         ...(tools.length === 0 ? {} : { tools }),
         ...(this.config.abortSignal === undefined ? {} : { signal: this.config.abortSignal }),
       })) {
-        for (const agentEvent of this.recordEvent(response, event)) yield agentEvent;
+        for (const agentEvent of this.recordEvent(response, event, sentMessageCount)) yield agentEvent;
       }
-      return true;
+      return "completed";
     } catch (error) {
+      if (error instanceof ContextTooLongError) return "context_too_long";
       const message = error instanceof Error ? error.message : String(error);
       yield { type: "error", message };
-      return false;
+      return "failed";
     }
   }
 
-  private recordEvent(response: CollectedResponse, event: StreamEvent): AgentEvent[] {
+  private recordEvent(
+    response: CollectedResponse,
+    event: StreamEvent,
+    sentMessageCount: number,
+  ): AgentEvent[] {
     switch (event.type) {
       case "text_delta":
         response.text += event.text;
@@ -174,6 +260,13 @@ export class Agent {
           args: event.arguments,
         }];
       case "usage":
+        this.#usageAnchor = {
+          baselineTokens: (event.inputTokens ?? 0)
+            + (event.cacheReadInputTokens ?? 0)
+            + (event.cacheCreationInputTokens ?? 0)
+            + (event.outputTokens ?? 0),
+          anchorCount: sentMessageCount,
+        };
         return [{
           type: "usage",
           ...(event.inputTokens === undefined ? {} : { inputTokens: event.inputTokens }),
@@ -205,10 +298,11 @@ export class Agent {
       results.push(...batchResults);
     }
 
+    await this.recordReadFiles(toolUses, results);
     const resultBlocks: ToolResultBlock[] = results.map((result) => ({
       type: "tool_result",
       toolUseId: result.toolId,
-      content: truncateToolOutput(result.result.output),
+      content: result.result.output,
       isError: result.result.isError,
     }));
     this.config.conversation.addToolResultsMessage(resultBlocks);
@@ -218,7 +312,7 @@ export class Agent {
         type: "tool_result",
         toolId: result.toolId,
         toolName: result.toolName,
-        output: truncateToolOutput(result.result.output),
+        output: result.result.output,
         isError: result.result.isError,
         elapsed: result.elapsed,
       };
@@ -309,7 +403,28 @@ export class Agent {
     if (includeToolUses) content.push(...response.toolUses);
     if (content.length > 0) this.config.conversation.addAssistantMessage(content);
   }
+
+  private async recordReadFiles(
+    toolUses: readonly ToolUseBlock[],
+    results: readonly ToolExecution[],
+  ): Promise<void> {
+    const successful = new Set(
+      results.filter((result) => !result.result.isError).map((result) => result.toolId),
+    );
+    for (const toolUse of toolUses) {
+      if (toolUse.name !== "ReadFile" || !successful.has(toolUse.id)) continue;
+      const filePath = toolUse.input.file_path;
+      if (typeof filePath !== "string" || filePath === "") continue;
+      try {
+        const absolutePath = resolve(this.config.workDir, filePath);
+        this.#recoveryState.recordFileRead(absolutePath, await readFile(absolutePath, "utf8"));
+      } catch {
+        // The tool already returned success; a later read failure only omits recovery context.
+      }
+    }
+  }
 }
+
 
 interface CollectedResponse {
   text: string;

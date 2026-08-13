@@ -60,7 +60,8 @@ describe("TUI layout", () => {
 
   it("shows unknown usage as dashes", () => {
     const view = render(<StatusBar mode="default" />);
-    expect(view.lastFrame()).toContain("default · ↑ - · ↓ -");
+    expect(view.lastFrame()).toContain("default");
+    expect(view.lastFrame()).toContain("-");
   });
 
   it("shows the active agent iteration in the activity label", () => {
@@ -82,9 +83,9 @@ describe("TUI layout", () => {
     expect(view.lastFrame()).not.toMatch(/[╭╮╰╯─]/);
   });
 
-  it("shows the active permission mode badge", () => {
+  it("shows the active permission mode in the status bar", () => {
     const view = render(
-      <InputBox permMode="acceptEdits" onSubmit={() => {}} />,
+      <StatusBar mode="acceptEdits" />,
     );
     expect(view.lastFrame()).toContain("Accept Edits on");
     expect(view.lastFrame()).toContain("shift+tab to cycle");

@@ -127,6 +127,11 @@ describe("App", () => {
 
     await waitFor(() => manager.connectAll.mock.calls.length === 1);
     await waitFor(() => manager.getClient.mock.calls.length > 0);
+    expect(view.lastFrame()).not.toContain("MCP servers (1):");
+
+    view.stdin.write("/mcp");
+    await waitFor(() => (view.lastFrame() ?? "").includes("/mcp"));
+    view.stdin.write("\r");
     await waitFor(() => (view.lastFrame() ?? "").includes("MCP servers (1):"));
     expect(view.lastFrame()).toContain("github");
     expect(view.lastFrame()).toContain("Tools: 1 total");
