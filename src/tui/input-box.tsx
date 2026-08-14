@@ -9,6 +9,7 @@ const commandIcons: Record<Command["type"], string> = {
   local: "•",
   local_ui: "◆",
   prompt: "↳",
+  skill_fork: "⇱",
 };
 
 export interface InputBoxProps {

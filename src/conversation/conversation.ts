@@ -42,17 +42,22 @@ export class Conversation {
   }
 
   addSystemReminder(content: string): void {
+    this.#messages.push(Conversation.systemReminderMessage(content));
+  }
+
+  /** 构造不一定持久化到 Conversation 的 reminder 消息。 */
+  static systemReminderMessage(content: string): ConversationMessage {
     if (content.trim() === "") {
       throw new Error("System reminder must not be empty");
     }
 
-    this.#messages.push({
+    return {
       role: "user",
       content: [{
         type: "text",
         text: `<system-reminder>\n${content}\n</system-reminder>`,
       }],
-    });
+    };
   }
 
   injectLongTermMemory(instructions: string, memories: string): void {

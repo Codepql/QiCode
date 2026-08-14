@@ -31,6 +31,7 @@ import type { ToolCategory } from "../tools/types.js";
 import { applyBudget } from "../toolresult/budget.js";
 import { buildConversation } from "../toolresult/reconstruct.js";
 import { ContentReplacementState } from "../toolresult/state.js";
+import { buildActiveSkillsReminder } from "../skills/executor.js";
 import { StreamingExecutor } from "./streaming-executor.js";
 import type { AgentEvent } from "./events.js";
 
@@ -52,6 +53,8 @@ export interface AgentConfig {
   fileHistory?: FileHistory;
   recoveryState?: RecoveryState;
   replacementState?: ContentReplacementState;
+  activeSkills?: ReadonlyMap<string, string>;
+  toolFilter?: (toolName: string) => boolean;
   checker: PermissionChecker;
   onPermissionRequest?: (
     toolName: string,
@@ -67,6 +70,8 @@ export class Agent {
   readonly #compactTracking = new AutoCompactTrackingState();
   readonly #recoveryState: RecoveryState;
   readonly #replacementState: ContentReplacementState;
+  readonly #activeSkills: ReadonlyMap<string, string>;
+  readonly #toolFilter: ((toolName: string) => boolean) | undefined;
   #usageAnchor: UsageAnchor | null = null;
 
   constructor(private readonly config: AgentConfig) {
@@ -74,6 +79,8 @@ export class Agent {
     this.#onPermissionRequest = config.onPermissionRequest;
     this.#recoveryState = config.recoveryState ?? new RecoveryState();
     this.#replacementState = config.replacementState ?? new ContentReplacementState();
+    this.#activeSkills = config.activeSkills ?? new Map();
+    this.#toolFilter = config.toolFilter;
   }
 
   async *run(): AsyncGenerator<AgentEvent> {
@@ -118,9 +125,10 @@ export class Agent {
           ),
         );
       }
+      const skillReminder = buildActiveSkillsReminder(this.#activeSkills);
       const response = createCollectedResponse();
-      const tools = toolDefinitions(this.config.registry, checker);
-      const streamResult = yield* this.streamResponse(response, tools);
+      const tools = toolDefinitions(this.config.registry, checker, this.#toolFilter);
+      const streamResult = yield* this.streamResponse(response, tools, skillReminder);
 
       if (streamResult === "context_too_long") {
         if (contextRecoveryAttempted) {
@@ -201,10 +209,14 @@ export class Agent {
   private async *streamResponse(
     response: CollectedResponse,
     tools: ToolDefinition[],
+    skillReminder: string,
   ): AsyncGenerator<AgentEvent, "completed" | "failed" | "context_too_long"> {
     const messages = this.config.conversation.getMessages();
+    const requestMessages = skillReminder === ""
+      ? messages
+      : [...messages, Conversation.systemReminderMessage(skillReminder)];
     const apiConversation = buildConversation(
-      applyBudget(messages, this.config.workDir, this.#replacementState),
+      applyBudget(requestMessages, this.config.workDir, this.#replacementState),
     );
     const sentMessageCount = messages.length;
     try {
@@ -333,6 +345,19 @@ export class Agent {
     const executions = new Map<string, ToolExecution>();
 
     for (const toolUse of toolUses) {
+      const tool = this.config.registry.get(toolUse.name);
+      if (tool?.system !== true && this.#toolFilter?.(toolUse.name) === false) {
+        executions.set(toolUse.id, {
+          toolId: toolUse.id,
+          toolName: toolUse.name,
+          result: {
+            output: `Tool '${toolUse.name}' is not available under the active Skill tool restrictions.`,
+            isError: true,
+          },
+          elapsed: 0,
+        });
+        continue;
+      }
       const category = toolCategory(this.config.registry, toolUse.name);
       const decision = checker.check(toolUse.name, category, toolUse.input);
 
@@ -454,8 +479,12 @@ function createCollectedResponse(): CollectedResponse {
 function toolDefinitions(
   registry: ToolRegistry,
   checker: PermissionChecker,
+  toolFilter: ((toolName: string) => boolean) | undefined,
 ): ToolDefinition[] {
-  return registry.listToolsForModel().filter((tool) => checker.allows(tool.category)).map((tool) => {
+  return registry.listToolsForModel().filter((tool) =>
+    tool.system === true
+    || (checker.allows(tool.category) && (toolFilter === undefined || toolFilter(tool.name)))
+  ).map((tool) => {
     const schema = tool.schema();
     const inputSchema = schema["input_schema"];
     return {

@@ -57,8 +57,10 @@ describe("CommandRegistry", () => {
     expect(registerModuleCommands(registry, [command("help")])).toEqual([
       "Command /help conflicts with an existing command.",
     ]);
-    expect(registerModuleCommands(registry, [command("skills")])).toEqual([]);
-    expect(registry.find("skills")?.name).toBe("skills");
+    expect(registerModuleCommands(registry, [command("skills")])).toEqual([
+      "Command /skills conflicts with an existing command.",
+    ]);
+    expect(registry.find("skills")?.type).toBe("local_ui");
 
     const calls: string[] = [];
     registry.registerActionHandler("open-skills", async (args) => { calls.push(args); });

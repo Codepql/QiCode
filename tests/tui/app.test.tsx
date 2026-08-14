@@ -1,4 +1,7 @@
 import React from "react";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { render } from "ink-testing-library";
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderConfig } from "../../src/config/types.js";
@@ -6,7 +9,8 @@ import type { ChatRequest, Provider } from "../../src/llm/client.js";
 import type { MCPClient } from "../../src/mcp/client.js";
 import type { MCPManager } from "../../src/mcp/manager.js";
 import type { EnvironmentContext } from "../../src/prompt/sections.js";
-import { App, initializeAgentRuntime } from "../../src/tui/app.js";
+import { App, initializeAgentRuntime, mergeForkUiMessages } from "../../src/tui/app.js";
+import type { ConversationMessage } from "../../src/conversation/types.js";
 
 const providerConfig: ProviderConfig = {
   name: "test",
@@ -18,6 +22,21 @@ const providerConfig: ProviderConfig = {
 };
 
 describe("App", () => {
+  it("keeps a fork result between the parent messages that happened before and after it", () => {
+    const message = (text: string): ConversationMessage => ({
+      role: "assistant",
+      content: [{ type: "text", text }],
+    });
+
+    const merged = mergeForkUiMessages(
+      [message("before"), message("after")],
+      [{ afterMessageCount: 1, message: message("fork") }],
+    );
+
+    expect(merged.map((item) => item.content[0]?.type === "text" && item.content[0].text))
+      .toEqual(["before", "fork", "after"]);
+  });
+
   it("renders the real input for a single configured provider", () => {
     const view = render(<App providers={[providerConfig]} />);
 
@@ -96,10 +115,11 @@ describe("App", () => {
 
   it("handles local slash commands without starting an agent request", async () => {
     const requests: ChatRequest[] = [];
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-app-"));
     const view = render(
       <App
         providers={[providerConfig]}
-        workDir="/workspace"
+        workDir={workDir}
         runtimeFactory={vi.fn(async () => ({
           provider: fakeProvider(requests),
           systemPrompt: "system",

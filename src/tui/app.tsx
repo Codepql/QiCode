@@ -18,15 +18,13 @@ import { loadInstructions } from "../memory/instructions.js";
 import { MemoryManager } from "../memory/manager.js";
 import { MemoryExtractor } from "../memory/extractor.js";
 import { FileHistory } from "../filehistory/filehistory.js";
-import { buildSystemPrompt, detectEnvironment } from "../prompt/builder.js";
 import {
   buildPlanModeExitReminder,
   buildPlanModeReentryReminder,
   getPlanPath,
   planFileExists,
 } from "../prompt/plan-mode.js";
-import type { EnvironmentContext } from "../prompt/sections.js";
-import { PermissionChecker, type PermissionMode } from "../permissions/checker.js";
+import { PermissionChecker, type Decision, type PermissionMode } from "../permissions/checker.js";
 import {
   listSessions,
   loadSession,
@@ -38,14 +36,11 @@ import {
 } from "../session/session.js";
 import { MCPManager } from "../mcp/manager.js";
 import { MCPToolWrapper } from "../mcp/tool-wrapper.js";
-import { BashTool } from "../tools/bash.js";
-import { EditFileTool } from "../tools/edit-file.js";
-import { GlobTool } from "../tools/glob.js";
-import { GrepTool } from "../tools/grep.js";
-import { ReadFileTool } from "../tools/read-file.js";
-import { ToolRegistry } from "../tools/registry.js";
-import { ToolSearchTool } from "../tools/tool-search.js";
-import { WriteFileTool } from "../tools/write-file.js";
+import { registerSkillCommands } from "../skills/commands.js";
+import { runFork } from "../skills/executor.js";
+import { runSkillForkAgent } from "../skills/fork-runner.js";
+import { createSkillRuntime, type SkillRuntime } from "../skills/runtime.js";
+import type { ToolRegistry } from "../tools/registry.js";
 import { VERSION } from "../version.js";
 import { Activity } from "./activity.js";
 import { ChatView, type ActiveTool } from "./chat-view.js";
@@ -55,8 +50,25 @@ import { PermissionDialog, type PermissionAction } from "./permission-dialog.js"
 import { ProviderSelect } from "./provider-select.js";
 import { StatusBar } from "./status-bar.js";
 import { formatArgs } from "./tool-display.js";
+import {
+  buildSkillSection,
+  contextWindowFor,
+  createToolRegistry,
+  initializeAgentRuntime,
+  startRuntime,
+  type AgentRuntime,
+  type RuntimeFactory,
+} from "./runtime.js";
+
+export { initializeAgentRuntime } from "./runtime.js";
+export type { AgentRuntime, RuntimeFactory } from "./runtime.js";
 
 type TurnStatus = "idle" | "waiting" | "streaming" | "failed";
+
+export interface ForkUiMessage {
+  afterMessageCount: number;
+  message: ConversationMessage;
+}
 
 export interface AppProps {
   providers: readonly ProviderConfig[];
@@ -67,37 +79,7 @@ export interface AppProps {
   mcpManagerFactory?: () => MCPManager;
 }
 
-export interface AgentRuntime {
-  provider: Provider;
-  systemPrompt: string;
-}
-
-export type RuntimeFactory = (
-  config: ProviderConfig,
-  workDir: string,
-) => Promise<AgentRuntime>;
-
-type ProviderFactory = (config: ProviderConfig) => Promise<Provider>;
-type EnvironmentDetector = (workDir: string) => Promise<EnvironmentContext>;
 const createMcpManager = (): MCPManager => new MCPManager();
-
-export async function initializeAgentRuntime(
-  config: ProviderConfig,
-  workDir: string,
-  providerFactory: ProviderFactory = createProvider,
-  environmentDetector: EnvironmentDetector = detectEnvironment,
-): Promise<AgentRuntime> {
-  const [provider, detectedEnvironment] = await Promise.all([
-    providerFactory(config),
-    environmentDetector(workDir),
-  ]);
-  const environment = { ...detectedEnvironment, model: config.model };
-
-  return {
-    provider,
-    systemPrompt: buildSystemPrompt(environment),
-  };
-}
 
 export function App({
   providers,
@@ -113,6 +95,7 @@ export function App({
     providers.length === 1 ? providers[0] : undefined,
   );
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [forkUiMessages, setForkUiMessages] = useState<ForkUiMessage[]>([]);
   const [streamingText, setStreamingText] = useState("");
   const [activeTools, setActiveTools] = useState<ActiveTool[]>([]);
   const [status, setStatus] = useState<TurnStatus>("idle");
@@ -138,6 +121,7 @@ export function App({
   const memoryExtractingRef = useRef(false);
   const fileHistoryRef = useRef<FileHistory | null>(null);
   const registryRef = useRef<ToolRegistry | null>(null);
+  const skillRuntimeRef = useRef<SkillRuntime | null>(null);
   const commandRegistryRef = useRef<CommandRegistry | null>(null);
   const commandUsageTrackerRef = useRef<CommandUsageTracker | null>(null);
   const commandDiagnosticsRef = useRef<string[]>([]);
@@ -157,6 +141,9 @@ export function App({
   const [mcpNotice, setMcpNotice] = useState("");
   const [compactNotice, setCompactNotice] = useState("");
   if (registryRef.current === null) registryRef.current = createToolRegistry();
+  if (skillRuntimeRef.current === null) {
+    skillRuntimeRef.current = createSkillRuntime(workDir, registryRef.current);
+  }
   if (commandRegistryRef.current === null) {
     const commandRegistry = createDefaultRegistry();
     for (const command of loadUserCommands(workDir)) {
@@ -171,8 +158,24 @@ export function App({
         commandDiagnosticsRef.current.push(`Skipped /${command.name}: ${detail}`);
       }
     }
+    commandDiagnosticsRef.current.push(
+      ...registerSkillCommands(skillRuntimeRef.current.catalog, commandRegistry, skillRuntimeRef.current.host),
+    );
+    commandRegistry.registerActionHandler("skills", () => {
+      setCompactNotice(formatSkillList(skillRuntimeRef.current!.catalog));
+    });
     commandRegistryRef.current = commandRegistry;
   }
+  skillRuntimeRef.current.registerTools((name) => {
+    const diagnostics = registerSkillCommands(
+      skillRuntimeRef.current!.catalog,
+      commandRegistryRef.current!,
+      skillRuntimeRef.current!.host,
+      [name],
+    );
+    if (diagnostics.length > 0) setCompactNotice(diagnostics.join("\n"));
+    runtimeRef.current = undefined;
+  });
   if (commandUsageTrackerRef.current === null) {
     commandUsageTrackerRef.current = new CommandUsageTracker(workDir);
   }
@@ -194,6 +197,7 @@ export function App({
       fileHistoryRef.current = null;
     }
     void Promise.resolve().then(() => cleanExpiredSessions(workDir)).catch(() => {});
+    setForkUiMessages([]);
     setMessages(conversationRef.current.getMessages());
   }, [workDir]);
 
@@ -254,7 +258,7 @@ export function App({
 
   useEffect(() => {
     runtimeRef.current = selectedConfig
-      ? startRuntime(runtimeFactory, selectedConfig, workDir)
+      ? startRuntime(runtimeFactory, selectedConfig, workDir, buildSkillSection(skillRuntimeRef.current!.catalog))
       : undefined;
   }, [runtimeFactory, selectedConfig, workDir]);
 
@@ -315,8 +319,18 @@ export function App({
   }
 
   async function handleSlashCommand(rawText: string, config: ProviderConfig): Promise<boolean> {
-    const parsed = parseCommand(rawText);
+    let parsed = parseCommand(rawText);
     if (parsed === null) return false;
+
+    // /skill <name> [args] 是 /<name> [args] 的统一短语法；
+    // 若用户自己注册了 /skill，则保留其优先级，不抢占该命令。
+    if (parsed.name.toLowerCase() === "skill" && parsed.args !== ""
+      && commandRegistryRef.current!.find("skill") === undefined) {
+      const [name, ...rest] = parsed.args.split(/\s+/);
+      if (name !== undefined && name !== "") {
+        parsed = { name, args: rest.join(" ") };
+      }
+    }
 
     const command = commandRegistryRef.current!.find(parsed.name);
     if (command === undefined) {
@@ -357,7 +371,14 @@ export function App({
       return true;
     }
     if (command.type === "prompt") {
-      const prompt = command.handler(context);
+      let prompt: string;
+      try {
+        prompt = command.handler(context);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setCompactNotice(`Command /${command.name} failed: ${message}`);
+        return true;
+      }
       if (prompt.trim() === "") {
         setCompactNotice(`Command /${command.name} produced an empty prompt.`);
       } else {
@@ -365,9 +386,143 @@ export function App({
       }
       return true;
     }
+    if (command.type === "skill_fork") {
+      await runForkSkill(command.name, parsed.args, config);
+      return true;
+    }
 
     await handleLocalUiAction(command.handler(context), parsed.args, config);
     return true;
+  }
+
+  async function runForkSkill(
+    name: string,
+    args: string,
+    config: ProviderConfig,
+  ): Promise<void> {
+    const skill = skillRuntimeRef.current!.catalog.get(name);
+    if (skill === undefined || skill.meta.mode !== "fork") {
+      setCompactNotice(`Skill /${name} is no longer available in fork mode.`);
+      return;
+    }
+
+    const controller = new AbortController();
+    const checkpointMessageIndex = conversationRef.current.getMessages().length;
+    abortRef.current = controller;
+    setStatus("waiting");
+    setStartedAt(Date.now());
+    setErrorMessage("");
+    setCompactNotice(`Running Skill /${skill.meta.name} in fork mode…`);
+
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, requestTimeoutMs);
+    try {
+      const runtimePromise = runtimeRef.current
+        ?? startRuntime(runtimeFactory, config, workDir, buildSkillSection(skillRuntimeRef.current!.catalog));
+      runtimeRef.current = runtimePromise;
+      const runtime = await runtimePromise;
+      const forkHost = {
+        ...skillRuntimeRef.current!.host,
+        runSubAgent: async (
+          prompt: string,
+          allowedTools: readonly string[] | undefined,
+          model: string | undefined,
+        ) => {
+          const provider = await providerForSkillFork(runtime.provider, model);
+          const result = await runSkillForkAgent(prompt, {
+            provider,
+            registry: registryRef.current!,
+            catalog: skillRuntimeRef.current!.catalog,
+            systemPrompt: runtime.systemPrompt,
+            workDir,
+            checker: new PermissionChecker(workDir, mode),
+            ...(allowedTools === undefined ? {} : { allowedTools }),
+            abortSignal: controller.signal,
+            contextWindow: contextWindowFor(config),
+            maxOutput: 8_192,
+            ...(fileHistoryRef.current === null ? {} : { fileHistory: fileHistoryRef.current }),
+            onPermissionRequest: (toolName, toolArgs, decision) =>
+              requestToolPermission(controller, toolName, toolArgs, decision),
+            reminders: mcpInstructionsRef.current,
+          });
+          return result.output;
+        },
+        snapshotParentMessages: (count: number) => conversationRef.current
+          .getMessages()
+          .slice(-count)
+          .map((message) => `[${message.role}] ${Conversation.visibleText(message)}`)
+          .filter((message) => message.trim() !== "")
+          .join("\n\n"),
+      };
+      const output = await runFork(skill, args, forkHost);
+      if (controller.signal.aborted) {
+        setCompactNotice(timedOut
+          ? `Skill /${skill.meta.name} timed out.`
+          : `Skill /${skill.meta.name} cancelled.`);
+        return;
+      }
+      if (output.trim() === "") {
+        setCompactNotice(`Skill /${skill.meta.name} completed without a text response.`);
+        return;
+      }
+      setForkUiMessages((current) => [...current, {
+        afterMessageCount: checkpointMessageIndex,
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: output }],
+        },
+      }]);
+      if (fileHistoryRef.current?.hasPendingChanges()) {
+        fileHistoryRef.current.makeSnapshot(checkpointMessageIndex, `/skill ${skill.meta.name}`);
+      }
+      setCompactNotice("");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCompactNotice(`Skill fork error: ${message}`);
+    } finally {
+      clearTimeout(timeout);
+      if (abortRef.current === controller) abortRef.current = undefined;
+      setStatus("idle");
+      setExitHint("");
+    }
+  }
+
+  function requestToolPermission(
+    controller: AbortController,
+    toolName: string,
+    args: Record<string, unknown>,
+    decision: Decision,
+  ): Promise<PermissionAction> {
+    return new Promise<PermissionAction>((resolve) => {
+      let settled = false;
+      const onAbort = (): void => finish("deny");
+      const finish = (action: PermissionAction): void => {
+        if (settled) return;
+        settled = true;
+        controller.signal.removeEventListener("abort", onAbort);
+        if (permissionResolveRef.current === finish) {
+          permissionResolveRef.current = null;
+          setPermissionRequest(null);
+        }
+        resolve(action);
+      };
+
+      controller.signal.addEventListener("abort", onAbort, { once: true });
+      permissionResolveRef.current = finish;
+      setPermissionRequest({
+        toolName,
+        argsSummary: formatArgs(args),
+        reason: decision.reason,
+      });
+    });
+  }
+
+  async function providerForSkillFork(provider: Provider, model: string | undefined): Promise<Provider> {
+    if (model === undefined || model === "" || model === provider.config.model) return provider;
+    return createProvider({ ...provider.config, model });
   }
 
   function handlePermissionCommand(args: string): void {
@@ -443,6 +598,7 @@ export function App({
       fileHistoryRef.current = null;
     }
     setMessages(conversation.getMessages());
+    setForkUiMessages([]);
     setStreamingText("");
     setActiveTools([]);
     setErrorMessage("");
@@ -477,7 +633,7 @@ export function App({
     setCompactNotice("");
     try {
       const runtimePromise = runtimeRef.current
-        ?? startRuntime(runtimeFactory, config, workDir);
+        ?? startRuntime(runtimeFactory, config, workDir, buildSkillSection(skillRuntimeRef.current!.catalog));
       runtimeRef.current = runtimePromise;
       const runtime = await runtimePromise;
       const result = await forceCompact(
@@ -525,7 +681,7 @@ export function App({
     let agentFailed = false;
     try {
       const runtimePromise = runtimeRef.current
-        ?? startRuntime(runtimeFactory, config, workDir);
+        ?? startRuntime(runtimeFactory, config, workDir, buildSkillSection(skillRuntimeRef.current!.catalog));
       runtimeRef.current = runtimePromise;
       const runtime = await runtimePromise;
       if (memoryExtractorRef.current === null) {
@@ -543,31 +699,11 @@ export function App({
         recoveryState: recoveryStateRef.current,
         contextWindow: contextWindowFor(config),
         maxOutput: 8_192,
+        activeSkills: skillRuntimeRef.current!.activeSkills,
+        toolFilter: (toolName) => skillRuntimeRef.current!.toolFilter()?.(toolName) ?? true,
         ...(fileHistoryRef.current === null ? {} : { fileHistory: fileHistoryRef.current }),
-        onPermissionRequest: async (toolName, args, decision) => {
-          return new Promise<PermissionAction>((resolve) => {
-            let settled = false;
-            const onAbort = (): void => finish("deny");
-            const finish = (action: PermissionAction): void => {
-              if (settled) return;
-              settled = true;
-              controller.signal.removeEventListener("abort", onAbort);
-              if (permissionResolveRef.current === finish) {
-                permissionResolveRef.current = null;
-                setPermissionRequest(null);
-              }
-              resolve(action);
-            };
-
-            controller.signal.addEventListener("abort", onAbort, { once: true });
-            permissionResolveRef.current = finish;
-            setPermissionRequest({
-              toolName,
-              argsSummary: formatArgs(args),
-              reason: decision.reason,
-            });
-          });
-        },
+        onPermissionRequest: (toolName, args, decision) =>
+          requestToolPermission(controller, toolName, args, decision),
       });
 
       for await (const event of agent.run()) {
@@ -807,6 +943,7 @@ export function App({
         fileHistoryRef.current = null;
       }
       setMessages(conversation.getMessages());
+      setForkUiMessages([]);
       setStreamingText("");
       setActiveTools([]);
       setErrorMessage("");
@@ -819,7 +956,7 @@ export function App({
   return (
     <Box flexDirection="column">
       <Header version={VERSION} model={selectedConfig.model} workDir={workDir} />
-      <ChatView messages={messages} streamingText={streamingText} activeTools={activeTools} maxHeight={chatMaxHeight} />
+      <ChatView messages={mergeForkUiMessages(messages, forkUiMessages)} streamingText={streamingText} activeTools={activeTools} maxHeight={chatMaxHeight} />
       <Activity
         active={busy}
         label={status === "waiting" ? "Waiting" : iteration === undefined ? "Thinking" : `Iteration ${iteration}`}
@@ -857,7 +994,6 @@ export function App({
     </Box>
   );
 }
-
 function injectDurableContext(conversation: Conversation, workDir: string): void {
   try {
     conversation.injectLongTermMemory(
@@ -875,28 +1011,34 @@ function sanitizeMcpError(message: string): string {
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, "");
 }
 
-function startRuntime(
-  runtimeFactory: RuntimeFactory,
-  config: ProviderConfig,
-  workDir: string,
-): Promise<AgentRuntime> {
-  const runtime = runtimeFactory(config, workDir);
-  void runtime.catch(() => {});
-  return runtime;
+function formatSkillList(catalog: SkillRuntime["catalog"]): string {
+  const skills = catalog.list();
+  if (skills.length === 0) return "No Skills found in .QiCode/skills/.";
+  return [
+    "Available Skills:",
+    ...skills.map((skill) =>
+      `  /${skill.meta.name} [${skill.meta.mode}] — ${skill.meta.description || "No description provided."}`,
+    ),
+  ].join("\n");
 }
 
-function createToolRegistry(): ToolRegistry {
-  const registry = new ToolRegistry();
-  registry.register(new ReadFileTool());
-  registry.register(new WriteFileTool());
-  registry.register(new EditFileTool());
-  registry.register(new BashTool());
-  registry.register(new GlobTool());
-  registry.register(new GrepTool());
-  registry.register(new ToolSearchTool(registry));
-  return registry;
-}
+/** 把隔离 Fork 的结果插回它完成时所在的主会话位置，不写入主 Conversation。 */
+export function mergeForkUiMessages(
+  messages: readonly ConversationMessage[],
+  forkMessages: readonly ForkUiMessage[],
+): ConversationMessage[] {
+  const byPosition = new Map<number, ConversationMessage[]>();
+  for (const entry of forkMessages) {
+    const position = Math.max(0, Math.min(entry.afterMessageCount, messages.length));
+    const entries = byPosition.get(position) ?? [];
+    entries.push(entry.message);
+    byPosition.set(position, entries);
+  }
 
-function contextWindowFor(config: ProviderConfig): number {
-  return config.protocol === "anthropic" ? 200_000 : 128_000;
+  const merged: ConversationMessage[] = [];
+  for (let position = 0; position <= messages.length; position += 1) {
+    if (position > 0) merged.push(messages[position - 1]!);
+    merged.push(...(byPosition.get(position) ?? []));
+  }
+  return merged;
 }

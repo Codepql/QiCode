@@ -1,4 +1,4 @@
-export type CommandType = "local" | "local_ui" | "prompt";
+export type CommandType = "local" | "local_ui" | "prompt" | "skill_fork";
 
 export interface CommandContext {
   workDir: string;
@@ -265,6 +265,13 @@ export function createDefaultRegistry(): CommandRegistry {
     type: "local",
     description: "Show connected MCP servers and tools",
     handler: () => "mcp",
+  });
+  registry.register({
+    name: "skills",
+    aliases: [],
+    type: "local_ui",
+    description: "List available Skills",
+    handler: () => "skills",
   });
 
   return registry;

@@ -45,6 +45,8 @@ describe("memory", () => {
   it("does not write a note when the extractor returns NONE", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "qicode-memory-"));
     await expect(new MemoryExtractor(provider("NONE"), workDir).extract("hello")).resolves.toEqual([]);
-    expect(new MemoryManager(workDir).getMemories()).toEqual([]);
+    expect(new MemoryManager(workDir).getMemories().filter((memory) =>
+      memory.path.startsWith(workDir),
+    )).toEqual([]);
   });
 });
