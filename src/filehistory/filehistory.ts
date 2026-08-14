@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 export const MAX_SNAPSHOTS = 100;
@@ -24,8 +24,32 @@ export class FileHistory {
   private snapshots: Snapshot[] = [];
 
   constructor(private readonly baseDir: string, sessionId: string) {
-    this.sessionDir = join(baseDir, ".qicode", "file-history", sessionId);
-    mkdirSync(this.sessionDir, { recursive: true });
+    this.sessionDir = join(baseDir, ".QiCode", "file-history", sessionId);
+  }
+
+  static cleanupEmptySessionDirs(baseDir: string): number {
+    const root = join(baseDir, ".QiCode", "file-history");
+    if (!existsSync(root)) return 0;
+
+    let removed = 0;
+    try {
+      for (const entry of readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const sessionDir = join(root, entry.name);
+        try {
+          if (readdirSync(sessionDir).length === 0) {
+            rmdirSync(sessionDir);
+            removed += 1;
+          }
+        } catch {
+          // One inaccessible history directory must not block startup.
+        }
+      }
+      if (readdirSync(root).length === 0) rmdirSync(root);
+    } catch {
+      // File history cleanup is best effort.
+    }
+    return removed;
   }
 
   trackEdit(filePath: string): void {
@@ -39,6 +63,7 @@ export class FileHistory {
       return;
     }
     try {
+      this.ensureSessionDir();
       writeFileSync(backupPath, readFileSync(absolutePath));
       if (!this.pendingBackups.has(absolutePath)) {
         this.pendingBackups.set(absolutePath, { path: absolutePath, version, file: backupPath });
@@ -108,5 +133,9 @@ export class FileHistory {
   private backupPath(filePath: string, version: number): string {
     const name = createHash("sha256").update(filePath).digest("hex").slice(0, 16);
     return join(this.sessionDir, `${name}@v${version}`);
+  }
+
+  private ensureSessionDir(): void {
+    mkdirSync(this.sessionDir, { recursive: true });
   }
 }

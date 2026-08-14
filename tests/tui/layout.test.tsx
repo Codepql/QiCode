@@ -9,6 +9,7 @@ import { InputBox } from "../../src/tui/input-box.js";
 import { PermissionDialog } from "../../src/tui/permission-dialog.js";
 import { sanitizeTerminalText } from "../../src/tui/sanitize-terminal.js";
 import { StatusBar } from "../../src/tui/status-bar.js";
+import { createDefaultRegistry } from "../../src/commands/commands.js";
 
 describe("TUI layout", () => {
   it("renders the fixed cat header and metadata on wide terminals", () => {
@@ -81,6 +82,21 @@ describe("TUI layout", () => {
     expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(19);
     expect(view.lastFrame()).toContain(">");
     expect(view.lastFrame()).not.toMatch(/[╭╮╰╯─]/);
+  });
+
+  it("shows slash completion candidates for a command prefix", async () => {
+    const view = render(
+      <InputBox
+        commands={createDefaultRegistry().listCommands()}
+        onSubmit={() => {}}
+      />,
+    );
+
+    view.stdin.write("/s");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(view.lastFrame()).toContain("/status");
+    expect(view.lastFrame()).toContain("/session");
+    view.unmount();
   });
 
   it("shows the active permission mode in the status bar", () => {

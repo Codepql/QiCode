@@ -94,6 +94,57 @@ describe("App", () => {
     view.unmount();
   });
 
+  it("handles local slash commands without starting an agent request", async () => {
+    const requests: ChatRequest[] = [];
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        workDir="/workspace"
+        runtimeFactory={vi.fn(async () => ({
+          provider: fakeProvider(requests),
+          systemPrompt: "system",
+        }))}
+      />,
+    );
+
+    view.stdin.write("/status");
+    await waitFor(() => (view.lastFrame() ?? "").includes("/status"));
+    view.stdin.write("\r");
+    await waitFor(() => (view.lastFrame() ?? "").includes("QiCode Status"));
+
+    expect(requests).toEqual([]);
+    view.unmount();
+  });
+
+  it("turns prompt slash commands into a normal agent request and consumes unknown commands", async () => {
+    const requests: ChatRequest[] = [];
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        workDir="/workspace"
+        runtimeFactory={vi.fn(async () => ({
+          provider: fakeProvider(requests),
+          systemPrompt: "system",
+        }))}
+      />,
+    );
+
+    view.stdin.write("/review auth");
+    await waitFor(() => (view.lastFrame() ?? "").includes("/review auth"));
+    view.stdin.write("\r");
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "system").length === 1);
+    const agentRequest = requests.find((request) => request.systemPrompt === "system");
+    expect(JSON.stringify(agentRequest?.messages)).toContain("Focus on: auth");
+    await waitFor(() => (view.lastFrame() ?? "").includes("done"));
+
+    view.stdin.write("/unknown-command");
+    await waitFor(() => (view.lastFrame() ?? "").includes("/unknown-command"));
+    view.stdin.write("\r");
+    await waitFor(() => (view.lastFrame() ?? "").includes("Unknown command: /unknown-command"));
+    expect(requests.filter((request) => request.systemPrompt === "system")).toHaveLength(1);
+    view.unmount();
+  });
+
   it("connects MCP for the session, keeps deferred tools hidden, and reports status", async () => {
     const requests: ChatRequest[] = [];
     const runtimeFactory = vi.fn(async () => ({

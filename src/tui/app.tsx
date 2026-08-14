@@ -3,6 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import { Agent } from "../agent/agent.js";
 import { forceCompact } from "../compact/compact.js";
 import { RecoveryState } from "../compact/recovery.js";
+import {
+  createDefaultRegistry,
+  parseCommand,
+  type CommandRegistry,
+} from "../commands/commands.js";
+import { loadUserCommands } from "../commands/loader.js";
+import { CommandUsageTracker } from "../commands/usage-tracker.js";
 import type { MCPServerConfig, ProviderConfig } from "../config/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import type { ConversationMessage } from "../conversation/types.js";
@@ -131,6 +138,9 @@ export function App({
   const memoryExtractingRef = useRef(false);
   const fileHistoryRef = useRef<FileHistory | null>(null);
   const registryRef = useRef<ToolRegistry | null>(null);
+  const commandRegistryRef = useRef<CommandRegistry | null>(null);
+  const commandUsageTrackerRef = useRef<CommandUsageTracker | null>(null);
+  const commandDiagnosticsRef = useRef<string[]>([]);
   const mcpManagerRef = useRef<MCPManager | null>(null);
   const mcpManagerFactoryRef = useRef(mcpManagerFactory);
   mcpManagerFactoryRef.current = mcpManagerFactory;
@@ -147,6 +157,25 @@ export function App({
   const [mcpNotice, setMcpNotice] = useState("");
   const [compactNotice, setCompactNotice] = useState("");
   if (registryRef.current === null) registryRef.current = createToolRegistry();
+  if (commandRegistryRef.current === null) {
+    const commandRegistry = createDefaultRegistry();
+    for (const command of loadUserCommands(workDir)) {
+      if (commandRegistry.hasConflict(command)) {
+        commandDiagnosticsRef.current.push(`Skipped /${command.name}: name or alias conflicts.`);
+        continue;
+      }
+      try {
+        commandRegistry.register(command);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        commandDiagnosticsRef.current.push(`Skipped /${command.name}: ${detail}`);
+      }
+    }
+    commandRegistryRef.current = commandRegistry;
+  }
+  if (commandUsageTrackerRef.current === null) {
+    commandUsageTrackerRef.current = new CommandUsageTracker(workDir);
+  }
   const busy = status === "waiting" || status === "streaming";
   const chatChromeRows =
     8 +
@@ -158,6 +187,7 @@ export function App({
 
   useEffect(() => {
     injectDurableContext(conversationRef.current, workDir);
+    FileHistory.cleanupEmptySessionDirs(workDir);
     try {
       fileHistoryRef.current = new FileHistory(workDir, sessionIdRef.current);
     } catch {
@@ -166,6 +196,12 @@ export function App({
     void Promise.resolve().then(() => cleanExpiredSessions(workDir)).catch(() => {});
     setMessages(conversationRef.current.getMessages());
   }, [workDir]);
+
+  useEffect(() => {
+    if (commandDiagnosticsRef.current.length > 0) {
+      setCompactNotice(commandDiagnosticsRef.current.join("\n"));
+    }
+  }, []);
 
   useEffect(() => () => {
     abortRef.current?.abort();
@@ -278,101 +314,193 @@ export function App({
     );
   }
 
-  async function submit(rawText: string): Promise<void> {
-    const config = selectedConfig;
-    if (busy || !config) return;
-    if (rawText.trim() === "/exit") {
-      exit();
+  async function handleSlashCommand(rawText: string, config: ProviderConfig): Promise<boolean> {
+    const parsed = parseCommand(rawText);
+    if (parsed === null) return false;
+
+    const command = commandRegistryRef.current!.find(parsed.name);
+    if (command === undefined) {
+      setCompactNotice(`Unknown command: /${parsed.name}`);
+      return true;
+    }
+    commandUsageTrackerRef.current!.record(command.name);
+
+    if (command.name === "mcp") {
+      const info = mcpInfoRef.current;
+      setCompactNotice(info.servers.length === 0
+        ? "No MCP servers connected."
+        : `MCP servers (${info.servers.length}): ${info.servers.join(", ")}\nTools: ${info.toolCount} total`);
+      return true;
+    }
+    if (command.name === "memory") {
+      await handleMemoryCommand(parsed.args || undefined);
+      return true;
+    }
+    if (command.name === "permission") {
+      handlePermissionCommand(parsed.args);
+      return true;
+    }
+
+    const context = {
+      workDir,
+      args: parsed.args,
+      permissionMode: () => mode,
+      tokenCount: () => [inputTokens ?? 0, outputTokens ?? 0] as const,
+      toolCount: () => registryRef.current?.listTools().length ?? 0,
+      memoryList: () => new MemoryManager(workDir).getMemories().map((memory) => memory.name),
+      memoryClear: () => new MemoryManager(workDir).clear(),
+      model: config.model,
+    };
+
+    if (command.type === "local") {
+      setCompactNotice(command.handler(context));
+      return true;
+    }
+    if (command.type === "prompt") {
+      const prompt = command.handler(context);
+      if (prompt.trim() === "") {
+        setCompactNotice(`Command /${command.name} produced an empty prompt.`);
+      } else {
+        await submit(prompt, true);
+      }
+      return true;
+    }
+
+    await handleLocalUiAction(command.handler(context), parsed.args, config);
+    return true;
+  }
+
+  function handlePermissionCommand(args: string): void {
+    const modes: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
+    const parts = args.split(/\s+/).filter(Boolean);
+    if (parts[0] === "mode" && parts[1] !== undefined && (modes as string[]).includes(parts[1])) {
+      setMode(parts[1] as PermissionMode);
+      setCompactNotice(`Permission mode -> ${parts[1]}`);
+      return;
+    }
+    if (parts[0] === "mode" && parts[1] !== undefined) {
+      setCompactNotice(`Unknown mode '${parts[1]}'. Valid: ${modes.join(", ")}`);
+      return;
+    }
+    setCompactNotice(
+      `Permission mode: ${mode}\nChange with shift+tab, or /permission mode <${modes.join("|")}>`,
+    );
+  }
+
+  async function handleLocalUiAction(
+    action: string,
+    args: string,
+    config: ProviderConfig,
+  ): Promise<void> {
+    const extensionHandler = commandRegistryRef.current!.getActionHandler(action);
+    if (extensionHandler !== undefined) {
+      try {
+        await extensionHandler(args);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setCompactNotice(`Command action failed: ${message}`);
+      }
       return;
     }
 
-    const command = rawText.trim();
+    switch (action) {
+      case "clear":
+        clearConversation();
+        return;
+      case "compact":
+        await compactConversation(config);
+        return;
+      case "plan":
+        enterPlanMode();
+        return;
+      case "do":
+        exitPlanMode();
+        return;
+      case "resume":
+        resumeSession(args || undefined);
+        return;
+      case "rewind":
+        handleRewind(args === "" ? undefined : Number(args));
+        return;
+      case "quit":
+        exit();
+        return;
+      default:
+        setCompactNotice(`Unsupported command action: ${action}`);
+    }
+  }
+
+  function clearConversation(): void {
+    const conversation = new Conversation();
+    injectDurableContext(conversation, workDir);
+    conversationRef.current = conversation;
+    recoveryStateRef.current = new RecoveryState();
+    sessionIdRef.current = newSessionId();
+    memoryCursorRef.current = 0;
+    try {
+      fileHistoryRef.current = new FileHistory(workDir, sessionIdRef.current);
+    } catch {
+      fileHistoryRef.current = null;
+    }
+    setMessages(conversation.getMessages());
+    setStreamingText("");
+    setActiveTools([]);
+    setErrorMessage("");
+    setCompactNotice("Conversation cleared.");
+    setInputTokens(undefined);
+    setOutputTokens(undefined);
+    setIteration(undefined);
+  }
+
+  function enterPlanMode(): void {
+    if (mode === "plan") return;
     const planPath = getPlanPath(workDir);
-    if (command === "/plan") {
-      if (mode === "plan") return;
-      const reminder = buildPlanModeReentryReminder(
-        planPath,
-        planFileExists(planPath),
+    const reminder = buildPlanModeReentryReminder(planPath, planFileExists(planPath));
+    if (reminder) conversationRef.current.addSystemReminder(reminder);
+    setMessages(conversationRef.current.getMessages());
+    setMode("plan");
+    setCompactNotice("Plan mode enabled.");
+  }
+
+  function exitPlanMode(): void {
+    if (mode === "default") return;
+    const planPath = getPlanPath(workDir);
+    conversationRef.current.addSystemReminder(
+      buildPlanModeExitReminder(planPath, planFileExists(planPath)),
+    );
+    setMessages(conversationRef.current.getMessages());
+    setMode("default");
+    setCompactNotice("Plan mode disabled.");
+  }
+
+  async function compactConversation(config: ProviderConfig): Promise<void> {
+    setCompactNotice("");
+    try {
+      const runtimePromise = runtimeRef.current
+        ?? startRuntime(runtimeFactory, config, workDir);
+      runtimeRef.current = runtimePromise;
+      const runtime = await runtimePromise;
+      const result = await forceCompact(
+        conversationRef.current,
+        runtime.provider,
+        recoveryStateRef.current,
+        registryRef.current!.listTools().map((tool) => tool.name),
       );
-      if (reminder) conversationRef.current.addSystemReminder(reminder);
-      setMessages(conversationRef.current.getMessages());
-      setMode("plan");
-      return;
-    }
-    if (command === "/do") {
-      if (mode === "default") return;
-      conversationRef.current.addSystemReminder(
-        buildPlanModeExitReminder(planPath, planFileExists(planPath)),
-      );
-      setMessages(conversationRef.current.getMessages());
-      setMode("default");
-      return;
-    }
-    const memoryMatch = command.match(/^\/memory(?:\s+(.+))?$/);
-    if (memoryMatch) {
-      void handleMemoryCommand(memoryMatch[1]?.trim());
-      return;
-    }
-    if (command === "/mcp") {
-      const currentMcpInfo = mcpInfoRef.current;
-      setMcpNotice(currentMcpInfo.servers.length === 0
-        ? "No MCP servers connected."
-        : `MCP servers (${currentMcpInfo.servers.length}): ${currentMcpInfo.servers.join(", ")}\nTools: ${currentMcpInfo.toolCount} total`);
-      return;
-    }
-    const rewindMatch = command.match(/^\/rewind(?:\s+(\d+))?$/);
-    if (rewindMatch) {
-      handleRewind(rewindMatch[1] === undefined ? undefined : Number(rewindMatch[1]));
-      return;
-    }
-    const resumeMatch = command.match(/^\/resume(?:\s+(.+))?$/);
-    if (resumeMatch) {
-      resumeSession(resumeMatch[1]?.trim());
-      return;
-    }
-    if (command === "/compact" || command === "/c") {
-      if (busy) return;
-      setCompactNotice("");
-      try {
-        const runtimePromise = runtimeRef.current
-          ?? startRuntime(runtimeFactory, config, workDir);
-        runtimeRef.current = runtimePromise;
-        const runtime = await runtimePromise;
-        const result = await forceCompact(
-          conversationRef.current,
-          runtime.provider,
-          recoveryStateRef.current,
-          registryRef.current!.listTools().map((tool) => tool.name),
-        );
-        if (result.boundary !== undefined) {
-          saveCompactBoundary(workDir, sessionIdRef.current, result.boundary);
-        }
-        setMessages(conversationRef.current.getMessages());
-        setCompactNotice(result.message);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        setCompactNotice(`Compaction failed: ${message}`);
-      }
-      return;
-    }
-    if (command.startsWith("/permission")) {
-      const modes: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
-      const parts = command.slice("/permission".length).trim().split(/\s+/).filter(Boolean);
-      if (parts[0] === "mode" && parts[1] !== undefined && (modes as string[]).includes(parts[1])) {
-        setMode(parts[1] as PermissionMode);
-        conversationRef.current.addSystemReminder(`Permission mode \u2192 ${parts[1]}`);
-      } else if (parts[0] === "mode" && parts[1] !== undefined) {
-        conversationRef.current.addSystemReminder(
-          `Unknown mode '${parts[1]}'. Valid: ${modes.join(", ")}`,
-        );
-      } else {
-        conversationRef.current.addSystemReminder(
-          `Permission mode: ${mode}\nChange with shift+tab, or /permission mode <${modes.join("|")}>`,
-        );
+      if (result.boundary !== undefined) {
+        saveCompactBoundary(workDir, sessionIdRef.current, result.boundary);
       }
       setMessages(conversationRef.current.getMessages());
-      return;
+      setCompactNotice(result.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setCompactNotice(`Compaction failed: ${message}`);
     }
+  }
+
+  async function submit(rawText: string, bypassSlash = false): Promise<void> {
+    const config = selectedConfig;
+    if (busy || !config) return;
+    if (!bypassSlash && await handleSlashCommand(rawText, config)) return;
 
     const checkpointMessageIndex = conversationRef.current.getMessages().length;
     conversationRef.current.addUserMessage(rawText);
@@ -560,6 +688,11 @@ export function App({
 
   async function handleMemoryCommand(query: string | undefined): Promise<void> {
     const manager = new MemoryManager(workDir);
+    if (query?.toLowerCase() === "clear") {
+      manager.clear();
+      setCompactNotice("Cleared durable memories.");
+      return;
+    }
     if (query === undefined || query === "") {
       const memories = manager.getMemories();
       setCompactNotice(memories.length === 0
@@ -629,15 +762,26 @@ export function App({
       setCompactNotice(sessions.length === 0
         ? "No sessions found."
         : `Sessions (use /resume <id> to restore):\n${sessions.map((session) => (
-          `  ${session.id} (${session.messageCount} messages) - ${session.firstMessage}`
+          `  ${sessions.indexOf(session)}: ${session.id} (${session.messageCount} messages) - ${session.firstMessage}`
         )).join("\n")}`);
       return;
     }
 
+    let targetSessionId = sessionId;
+    if (/^\d+$/.test(sessionId)) {
+      const index = Number(sessionId);
+      const session = listSessions(workDir).at(index);
+      if (session === undefined) {
+        setCompactNotice(`Unknown session index: ${sessionId}`);
+        return;
+      }
+      targetSessionId = session.id;
+    }
+
     try {
-      const saved = loadSession(workDir, sessionId);
+      const saved = loadSession(workDir, targetSessionId);
       if (saved.length === 0) {
-        setCompactNotice(`Session "${sessionId}" not found or empty.`);
+        setCompactNotice(`Session "${targetSessionId}" not found or empty.`);
         return;
       }
 
@@ -656,9 +800,9 @@ export function App({
 
       conversationRef.current = conversation;
       recoveryStateRef.current = new RecoveryState();
-      sessionIdRef.current = sessionId;
+      sessionIdRef.current = targetSessionId;
       try {
-        fileHistoryRef.current = new FileHistory(workDir, sessionId);
+        fileHistoryRef.current = new FileHistory(workDir, targetSessionId);
       } catch {
         fileHistoryRef.current = null;
       }
@@ -666,7 +810,7 @@ export function App({
       setStreamingText("");
       setActiveTools([]);
       setErrorMessage("");
-      setCompactNotice(`Resumed session ${sessionId} (${restored.length} messages).`);
+      setCompactNotice(`Resumed session ${targetSessionId} (${restored.length} messages).`);
     } catch {
       setCompactNotice(`Session "${sessionId}" could not be restored.`);
     }
@@ -700,6 +844,8 @@ export function App({
       <Box marginTop={1} flexDirection="column">
         <InputBox
           disabled={busy || permissionRequest !== null}
+          commands={commandRegistryRef.current!.listCommands()}
+          usageTracker={commandUsageTrackerRef.current!}
           onSubmit={(value) => void submit(value)}
         />
         <StatusBar
