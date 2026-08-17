@@ -15,13 +15,18 @@ export interface AgentToolHost {
  */
 export class AgentTool {
   readonly name = "Agent";
-  readonly description = "Delegate a bounded task to an isolated SubAgent role.";
+  readonly description = "Delegate a bounded task to one of the listed SubAgent roles. Use the exact subagent_type value; background roles return immediately with a task id.";
   readonly category = "read" as const;
   readonly system = true;
 
   constructor(private readonly host: AgentToolHost) {}
 
   schema(): Record<string, unknown> {
+    const definitions = this.host.definitions();
+    const roleNames = definitions.map((definition) => definition.name);
+    const roleDescriptions = definitions.map((definition) =>
+      `${definition.name}: ${definition.description}${definition.background ? " (background; returns a task id)" : " (foreground; waits for the result)"}`,
+    );
     return {
       name: this.name,
       description: this.description,
@@ -30,7 +35,11 @@ export class AgentTool {
         properties: {
           description: { type: "string", description: "Short task label" },
           prompt: { type: "string", description: "Bounded task for the SubAgent" },
-          subagent_type: { type: "string", description: "Role name, default general-purpose" },
+          subagent_type: {
+            type: "string",
+            enum: roleNames,
+            description: `Exact role name. Available roles: ${roleDescriptions.join("; ")}. Do not substitute another role.`,
+          },
           model: { type: "string", description: "Optional model override" },
           operation: { type: "string", enum: ["run", "status", "cancel"] },
           task_id: { type: "string", description: "Background task id for status/cancel" },
