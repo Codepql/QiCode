@@ -4,7 +4,13 @@ import { ToolSearchTool } from "../tools/tool-search.js";
 import type { AgentDefinition } from "./definition.js";
 
 const RECURSIVE_AGENT_TOOL = "Agent";
-const BACKGROUND_TOOL_NAMES = new Set(["ReadFile", "Glob", "Grep"]);
+const BACKGROUND_TOOL_NAMES = new Set([
+  "ReadFile",
+  "Glob",
+  "Grep",
+  "EnterWorktree",
+  "ExitWorktree",
+]);
 
 export interface SubAgentToolFilterOptions {
   /** 后台任务默认只能读取；角色可通过 background 字段选择该更小的集合。 */

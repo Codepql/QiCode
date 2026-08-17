@@ -5,6 +5,8 @@ import type { EnvironmentContext } from "../prompt/sections.js";
 import type { SkillCatalog } from "../skills/catalog.js";
 import { BashTool } from "../tools/bash.js";
 import { EditFileTool } from "../tools/edit-file.js";
+import { EnterWorktreeTool } from "../tools/enter-worktree.js";
+import { ExitWorktreeTool } from "../tools/exit-worktree.js";
 import { GlobTool } from "../tools/glob.js";
 import { GrepTool } from "../tools/grep.js";
 import { ReadFileTool } from "../tools/read-file.js";
@@ -86,6 +88,8 @@ export function createToolRegistry(): ToolRegistry {
   registry.register(new GlobTool());
   registry.register(new GrepTool());
   registry.register(new ToolSearchTool(registry));
+  registry.register(new EnterWorktreeTool());
+  registry.register(new ExitWorktreeTool());
   return registry;
 }
 

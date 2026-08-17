@@ -46,6 +46,23 @@ describe("createSubAgentToolRegistry", () => {
 
     expect(child.listTools().map((item) => item.name)).toEqual(["ToolSearch"]);
   });
+
+  it("keeps Worktree tools in the background Agent allowlist", () => {
+    const parent = new ToolRegistry();
+    parent.register(tool("ReadFile", "read"));
+    parent.register(tool("EnterWorktree", "write"));
+    parent.register(tool("ExitWorktree", "write"));
+    parent.register(tool("WriteFile", "write"));
+
+    const child = createSubAgentToolRegistry(parent, { ...definition, background: true });
+
+    expect(child.listTools().map((item) => item.name)).toEqual([
+      "ReadFile",
+      "EnterWorktree",
+      "ExitWorktree",
+      "ToolSearch",
+    ]);
+  });
 });
 
 function tool(name: string, category: Tool["category"], system = false): Tool {

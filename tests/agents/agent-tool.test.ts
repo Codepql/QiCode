@@ -11,9 +11,23 @@ const foreground: AgentDefinition = {
   permissionMode: "default",
   background: false,
 };
-const background: AgentDefinition = { ...foreground, name: "background", background: true };
+const background: AgentDefinition = {
+  ...foreground,
+  name: "background",
+  description: "background",
+  background: true,
+};
 
 describe("AgentTool", () => {
+  it("exposes loaded roles and their background behavior in the tool schema", () => {
+    const schema = createTool().schema();
+    const properties = (schema.input_schema as { properties: Record<string, unknown> }).properties;
+    const role = properties.subagent_type as { enum: string[]; description: string };
+
+    expect(role.enum).toEqual(["foreground", "background"]);
+    expect(role.description).toContain("background: background (background; returns a task id)");
+  });
+
   it("runs a foreground role and rejects an unknown role", async () => {
     const tool = createTool();
 
