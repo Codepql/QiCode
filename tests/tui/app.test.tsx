@@ -46,6 +46,19 @@ describe("App", () => {
     expect(view.lastFrame()).not.toContain("Static preview only");
   });
 
+  it("shows invalid Hook configuration as a local notice", async () => {
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        hooks={[{ event: "invalid", action: { type: "prompt", prompt: "ignored" } }]}
+      />,
+    );
+
+    await waitFor(() => (view.lastFrame() ?? "").includes("Hook configuration"));
+    expect(view.lastFrame()).toContain("invalid event 'invalid'");
+    view.unmount();
+  });
+
   it("builds a runtime prompt from the detected environment and selected model", async () => {
     const provider = fakeProvider([]);
     const environment: EnvironmentContext = {
@@ -101,6 +114,39 @@ describe("App", () => {
       "stable-system-prompt",
       "stable-system-prompt",
     ]);
+    view.unmount();
+  });
+
+  it("keeps once Hook state across App re-renders", async () => {
+    const requests: ChatRequest[] = [];
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        workDir="/workspace"
+        hooks={[{
+          event: "pre_send",
+          action: { type: "prompt", prompt: "once only" },
+          once: true,
+        }]}
+        runtimeFactory={vi.fn(async () => ({
+          provider: fakeProvider(requests),
+          systemPrompt: "system",
+        }))}
+      />,
+    );
+
+    view.stdin.write("first");
+    await waitFor(() => (view.lastFrame() ?? "").includes("first"));
+    view.stdin.write("\r");
+    await waitFor(() => requests.length >= 1);
+    view.stdin.write("second");
+    await waitFor(() => (view.lastFrame() ?? "").includes("second"));
+    view.stdin.write("\r");
+    await waitFor(() => requests.length >= 2);
+
+    expect(requests).toHaveLength(2);
+    expect(requests.filter((request) => JSON.stringify(request.messages).includes("once only")))
+      .toHaveLength(1);
     view.unmount();
   });
 

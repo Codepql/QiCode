@@ -44,6 +44,8 @@ const CONTENT_FIELDS: Record<string, string> = {
   Glob: "pattern",
   Grep: "pattern",
   InstallSkill: "source",
+  HookCommand: "command",
+  HookHttp: "url",
 };
 
 /**

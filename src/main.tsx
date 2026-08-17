@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { render } from "ink";
 import {
   loadConfig,
+  loadConfigLayers,
   loadMcpConfigLayers,
   resolveConfigPath,
 } from "./config/load-config.js";
@@ -16,16 +17,17 @@ export { VERSION, versionText } from "./version.js";
 const entryPath = process.argv[1];
 if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
   const args = process.argv.slice(2);
-  resolveStartupConfigPath(args)
-    .then(async (configPath) => {
-      const [config, mcpConfig] = await Promise.all([
-        loadConfig(configPath),
-        loadMcpConfigLayers(),
-      ]);
+  loadStartupConfig(args)
+    .then(async (config) => {
+      const mcpConfig = await loadMcpConfigLayers();
       return { config, mcpConfig };
     })
     .then(({ config, mcpConfig }) => render(
-      <App providers={config.providers} mcpServers={mcpConfig.mcp_servers} />,
+      <App
+        providers={config.providers}
+        mcpServers={mcpConfig.mcp_servers}
+        hooks={config.hooks}
+      />,
       { exitOnCtrlC: false },
     ))
     .catch((error: unknown) => {
@@ -33,6 +35,11 @@ if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
       process.stderr.write(`${message}\n`);
       process.exitCode = 1;
     });
+}
+
+async function loadStartupConfig(args: readonly string[]) {
+  if (args.length === 0) return loadConfigLayers();
+  return loadConfig(resolveConfigPath(args));
 }
 
 export async function resolveStartupConfigPath(

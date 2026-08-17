@@ -1,5 +1,5 @@
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Agent } from "../agent/agent.js";
 import { forceCompact } from "../compact/compact.js";
 import { RecoveryState } from "../compact/recovery.js";
@@ -36,6 +36,8 @@ import {
 } from "../session/session.js";
 import { MCPManager } from "../mcp/manager.js";
 import { MCPToolWrapper } from "../mcp/tool-wrapper.js";
+import { HookEngine } from "../hooks/engine.js";
+import { validateHooks } from "../hooks/validate.js";
 import { registerSkillCommands } from "../skills/commands.js";
 import { runFork } from "../skills/executor.js";
 import { runSkillForkAgent } from "../skills/fork-runner.js";
@@ -73,6 +75,7 @@ export interface ForkUiMessage {
 export interface AppProps {
   providers: readonly ProviderConfig[];
   mcpServers?: readonly MCPServerConfig[];
+  hooks?: readonly unknown[];
   workDir?: string;
   requestTimeoutMs?: number;
   runtimeFactory?: RuntimeFactory;
@@ -80,10 +83,12 @@ export interface AppProps {
 }
 
 const createMcpManager = (): MCPManager => new MCPManager();
+const EMPTY_HOOKS: readonly unknown[] = [];
 
 export function App({
   providers,
   mcpServers = [],
+  hooks,
   workDir = process.cwd(),
   requestTimeoutMs = 120_000,
   runtimeFactory = initializeAgentRuntime,
@@ -140,6 +145,20 @@ export function App({
   const mcpInfoRef = useRef(mcpInfo);
   const [mcpNotice, setMcpNotice] = useState("");
   const [compactNotice, setCompactNotice] = useState("");
+  const [hookNotice, setHookNotice] = useState("");
+  const hookDefinitions = hooks ?? EMPTY_HOOKS;
+  const hookRuntime = useMemo(() => {
+    const validation = validateHooks(hookDefinitions);
+    return {
+      engine: new HookEngine(validation.hooks),
+      diagnostics: validation.diagnostics.map((diagnostic) => {
+        const label = diagnostic.id === undefined
+          ? `hooks[${diagnostic.index}]`
+          : `hooks[${diagnostic.index}] (${diagnostic.id})`;
+        return `${label}: ${diagnostic.message}`;
+      }),
+    };
+  }, [hookDefinitions, workDir]);
   if (registryRef.current === null) registryRef.current = createToolRegistry();
   if (skillRuntimeRef.current === null) {
     skillRuntimeRef.current = createSkillRuntime(workDir, registryRef.current);
@@ -184,6 +203,7 @@ export function App({
     8 +
     (errorMessage !== "" ? 1 : 0) +
     (compactNotice !== "" ? 1 : 0) +
+    (hookNotice !== "" ? 1 : 0) +
     (exitHint !== "" ? 1 : 0) +
     (permissionRequest !== null ? 8 : 0);
   const chatMaxHeight = Math.max(4, (stdout.rows ?? 24) - chatChromeRows);
@@ -200,6 +220,15 @@ export function App({
     setForkUiMessages([]);
     setMessages(conversationRef.current.getMessages());
   }, [workDir]);
+
+  useEffect(() => {
+    setHookNotice(hookRuntime.diagnostics.join("\n"));
+  }, [hookRuntime]);
+
+  useEffect(() => () => {
+    // Shutdown cannot open a new approval dialog after Ink has unmounted.
+    void hookRuntime.engine.fire("shutdown");
+  }, [hookRuntime]);
 
   useEffect(() => {
     if (commandDiagnosticsRef.current.length > 0) {
@@ -701,6 +730,7 @@ export function App({
         maxOutput: 8_192,
         activeSkills: skillRuntimeRef.current!.activeSkills,
         toolFilter: (toolName) => skillRuntimeRef.current!.toolFilter()?.(toolName) ?? true,
+        hookEngine: hookRuntime.engine,
         ...(fileHistoryRef.current === null ? {} : { fileHistory: fileHistoryRef.current }),
         onPermissionRequest: (toolName, args, decision) =>
           requestToolPermission(controller, toolName, args, decision),
@@ -964,6 +994,7 @@ export function App({
       />
       {errorMessage && <Text color="red">Error: {errorMessage}</Text>}
       {compactNotice && <Text color="cyan">{compactNotice}</Text>}
+      {hookNotice && <Text color="yellow">Hook configuration: {hookNotice}</Text>}
       {mcpNotice && <Text color="yellow">{mcpNotice}</Text>}
       {exitHint && <Text color="yellow">{exitHint}</Text>}
       {permissionRequest && (
