@@ -62,6 +62,7 @@ export interface AgentConfig {
   activeSkills?: ReadonlyMap<string, string>;
   toolFilter?: (toolName: string) => boolean;
   hookEngine?: HookEngine;
+  transientReminders?: () => readonly string[];
   checker: PermissionChecker;
   onPermissionRequest?: (
     toolName: string,
@@ -140,9 +141,14 @@ export class Agent {
       await this.fireHook("pre_send");
       const skillReminder = buildActiveSkillsReminder(this.#activeSkills);
       const hookReminders = this.config.hookEngine?.drainNotifications() ?? [];
+      const transientReminders = this.config.transientReminders?.() ?? [];
       const response = createCollectedResponse();
       const tools = toolDefinitions(this.config.registry, checker, this.#toolFilter);
-      const streamResult = yield* this.streamResponse(response, tools, [skillReminder, ...hookReminders]);
+      const streamResult = yield* this.streamResponse(
+        response,
+        tools,
+        [skillReminder, ...hookReminders, ...transientReminders],
+      );
 
       if (streamResult === "context_too_long") {
         if (contextRecoveryAttempted) {

@@ -212,6 +212,24 @@ describe("Agent", () => {
     expect(JSON.stringify(provider.requests[0]?.messages)).toContain("Reply in Chinese.");
     expect(JSON.stringify(conversation.getMessages())).not.toContain("Reply in Chinese.");
   });
+
+  it("adds transient runtime reminders to one request without persisting them", async () => {
+    const provider = new FakeProvider([[{ type: "done" }]]);
+    const conversation = conversationWithUser();
+
+    await collect(agent(
+      provider,
+      new ToolRegistry(),
+      conversation,
+      undefined,
+      undefined,
+      undefined,
+      () => ["Background task completed"],
+    ));
+
+    expect(JSON.stringify(provider.requests[0]?.messages)).toContain("Background task completed");
+    expect(JSON.stringify(conversation.getMessages())).not.toContain("Background task completed");
+  });
 });
 
 class FakeProvider implements Provider {
@@ -258,6 +276,7 @@ function agent(
   maxIterations?: number,
   checker?: PermissionChecker,
   hookEngine?: HookEngine,
+  transientReminders?: () => readonly string[],
 ): AsyncIterable<AgentEvent> {
   return new Agent({
     provider,
@@ -267,6 +286,7 @@ function agent(
     workDir: process.cwd(),
     ...(maxIterations === undefined ? {} : { maxIterations }),
     ...(hookEngine === undefined ? {} : { hookEngine }),
+    ...(transientReminders === undefined ? {} : { transientReminders }),
     // 默认 bypassPermissions：既有"测试时不走 HITL"的预期不变。
     checker: checker ?? new PermissionChecker(process.cwd(), "bypassPermissions"),
   }).run();
