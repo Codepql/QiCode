@@ -3,6 +3,7 @@ import { Agent, MAX_TOOL_OUTPUT_CHARS } from "../../src/agent/agent.js";
 import type { AgentEvent } from "../../src/agent/events.js";
 import { Conversation } from "../../src/conversation/conversation.js";
 import { PermissionChecker } from "../../src/permissions/checker.js";
+import { HookEngine } from "../../src/hooks/engine.js";
 import type { ChatRequest, Provider } from "../../src/llm/client.js";
 import type { StreamEvent } from "../../src/llm/events.js";
 import { ToolRegistry } from "../../src/tools/registry.js";
@@ -165,6 +166,70 @@ describe("Agent", () => {
     expect(Conversation.visibleText(provider.requests[0]!.messages.at(-1)!)).toContain("计划模式已激活");
     expect(provider.requests[0]!.tools).toBeUndefined();
   });
+
+  it("returns a Hook rejection without executing the requested tool", async () => {
+    const calls: string[] = [];
+    const registry = new ToolRegistry();
+    registry.register(recordingTool("WriteOne", "write", calls));
+    const provider = new FakeProvider([
+      [toolCall("write", "WriteOne"), { type: "done" }],
+      [{ type: "done" }],
+    ]);
+    const hooks = new HookEngine([{
+      event: "pre_tool_use",
+      action: { type: "prompt", prompt: "writes require review" },
+      reject: true,
+      once: false,
+      async: false,
+      onError: "ignore",
+    }]);
+
+    const events = await collect(agent(provider, registry, conversationWithUser(), undefined, undefined, hooks));
+
+    expect(calls).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "tool_result",
+      toolId: "write",
+      isError: true,
+      output: "Rejected by Hook policy: writes require review",
+    }));
+  });
+
+  it("adds Hook prompts to the request without persisting them in conversation history", async () => {
+    const provider = new FakeProvider([[{ type: "done" }]]);
+    const conversation = conversationWithUser();
+    const hooks = new HookEngine([{
+      event: "pre_send",
+      action: { type: "prompt", prompt: "Reply in Chinese." },
+      reject: false,
+      once: false,
+      async: false,
+      onError: "ignore",
+    }]);
+
+    await collect(agent(provider, new ToolRegistry(), conversation, undefined, undefined, hooks));
+
+    expect(JSON.stringify(provider.requests[0]?.messages)).toContain("Reply in Chinese.");
+    expect(JSON.stringify(conversation.getMessages())).not.toContain("Reply in Chinese.");
+  });
+
+  it("adds transient runtime reminders to one request without persisting them", async () => {
+    const provider = new FakeProvider([[{ type: "done" }]]);
+    const conversation = conversationWithUser();
+
+    await collect(agent(
+      provider,
+      new ToolRegistry(),
+      conversation,
+      undefined,
+      undefined,
+      undefined,
+      () => ["Background task completed"],
+    ));
+
+    expect(JSON.stringify(provider.requests[0]?.messages)).toContain("Background task completed");
+    expect(JSON.stringify(conversation.getMessages())).not.toContain("Background task completed");
+  });
 });
 
 class FakeProvider implements Provider {
@@ -210,6 +275,8 @@ function agent(
   conversation: Conversation,
   maxIterations?: number,
   checker?: PermissionChecker,
+  hookEngine?: HookEngine,
+  transientReminders?: () => readonly string[],
 ): AsyncIterable<AgentEvent> {
   return new Agent({
     provider,
@@ -218,6 +285,8 @@ function agent(
     systemPrompt: "system",
     workDir: process.cwd(),
     ...(maxIterations === undefined ? {} : { maxIterations }),
+    ...(hookEngine === undefined ? {} : { hookEngine }),
+    ...(transientReminders === undefined ? {} : { transientReminders }),
     // 默认 bypassPermissions：既有"测试时不走 HITL"的预期不变。
     checker: checker ?? new PermissionChecker(process.cwd(), "bypassPermissions"),
   }).run();

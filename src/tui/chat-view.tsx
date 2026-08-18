@@ -4,6 +4,7 @@ import type { Token, Tokens } from "marked";
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactElement,
   type ReactNode,
@@ -46,6 +47,7 @@ export function ChatView({
   const { stdout } = useStdout();
   const [scrollTop, setScrollTop] = useState(0);
   const [followBottom, setFollowBottom] = useState(true);
+  const scrollTopRef = useRef(0);
 
   const width = stdout.columns ?? 80;
   const viewportHeight = Math.max(
@@ -73,38 +75,49 @@ export function ChatView({
   const suffixHeight = streamingSuffixRows + activeSuffixRows;
   const contentHeight = totalTurnsHeight + suffixHeight;
   const maxScroll = Math.max(0, contentHeight - viewportHeight);
+  // While following live output, render from the current bottom immediately.
+  // Waiting for an effect here causes a frame at stale top=0 on every stream update.
+  const displayScrollTop = followBottom ? maxScroll : scrollTop;
 
   // 默认跟随底部：新内容进来自动滚到最新一行。
   useEffect(() => {
-    if (followBottom) setScrollTop(maxScroll);
+    if (followBottom) updateScrollTop(maxScroll);
   }, [followBottom, maxScroll]);
 
   // 手动上翻后内容变短时，把 scrollTop 钳制回合法范围。
   useEffect(() => {
-    setScrollTop((previous) => Math.min(previous, maxScroll));
+    updateScrollTop((previous) => Math.min(previous, maxScroll));
   }, [maxScroll]);
 
   useInput((_input, key) => {
     const pageStep = Math.max(1, viewportHeight - 2);
-    if (key.pageUp) {
+    const currentScrollTop = followBottom ? maxScroll : scrollTopRef.current;
+    if (key.pageUp || key.upArrow) {
       setFollowBottom(false);
-      setScrollTop((previous) => Math.max(0, previous - pageStep));
-    } else if (key.pageDown) {
-      const next = Math.min(maxScroll, scrollTop + pageStep);
-      setScrollTop(next);
-      if (next >= maxScroll) setFollowBottom(true);
+      updateScrollTop(Math.max(0, currentScrollTop - (key.pageUp ? pageStep : 1)));
+    } else if (key.pageDown || key.downArrow) {
+      const next = Math.min(maxScroll, currentScrollTop + (key.pageDown ? pageStep : 1));
+      updateScrollTop(next);
+      setFollowBottom(next >= maxScroll);
     } else if (key.home) {
       setFollowBottom(false);
-      setScrollTop(0);
+      updateScrollTop(0);
     } else if (key.end) {
       setFollowBottom(true);
-      setScrollTop(maxScroll);
+      updateScrollTop(maxScroll);
     }
   });
 
-  const range = visibleRange(turns, heights, scrollTop, viewportHeight);
+  function updateScrollTop(next: number | ((previous: number) => number)): void {
+    const resolved = typeof next === "function" ? next(scrollTopRef.current) : next;
+    const bounded = Math.max(0, Math.min(maxScroll, resolved));
+    scrollTopRef.current = bounded;
+    setScrollTop(bounded);
+  }
+
+  const range = visibleRange(turns, heights, displayScrollTop, viewportHeight);
   // 只有当窗口底部越过回合区（到达内容尾部）时才渲染流式文本/加载工具。
-  const showSuffix = scrollTop + viewportHeight > totalTurnsHeight;
+  const showSuffix = displayScrollTop + viewportHeight > totalTurnsHeight;
   const visibleTurns = turns.slice(range.start, range.end);
 
   return (

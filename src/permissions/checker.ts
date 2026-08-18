@@ -43,6 +43,9 @@ const CONTENT_FIELDS: Record<string, string> = {
   EditFile: "file_path",
   Glob: "pattern",
   Grep: "pattern",
+  InstallSkill: "source",
+  HookCommand: "command",
+  HookHttp: "url",
 };
 
 /**

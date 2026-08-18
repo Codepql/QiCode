@@ -9,6 +9,7 @@ import { InputBox } from "../../src/tui/input-box.js";
 import { PermissionDialog } from "../../src/tui/permission-dialog.js";
 import { sanitizeTerminalText } from "../../src/tui/sanitize-terminal.js";
 import { StatusBar } from "../../src/tui/status-bar.js";
+import { createDefaultRegistry } from "../../src/commands/commands.js";
 
 describe("TUI layout", () => {
   it("renders the fixed cat header and metadata on wide terminals", () => {
@@ -81,6 +82,41 @@ describe("TUI layout", () => {
     expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(19);
     expect(view.lastFrame()).toContain(">");
     expect(view.lastFrame()).not.toMatch(/[╭╮╰╯─]/);
+  });
+
+  it("keeps manual scroll position and supports arrow-key scrolling", async () => {
+    const messages: ConversationMessage[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      messages.push(
+        { role: "user", content: [{ type: "text", text: `question-${index}` }] },
+        { role: "assistant", content: [{ type: "text", text: `answer-${index}` }] },
+      );
+    }
+    const view = render(<ChatView messages={messages} maxHeight={5} />);
+
+    view.stdin.write("\u001b[H");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(view.lastFrame()).toContain("question-0");
+
+    for (let index = 0; index < 80; index += 1) view.stdin.write("\u001b[B");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(view.lastFrame()).toContain("question-11");
+    view.unmount();
+  });
+
+  it("shows slash completion candidates for a command prefix", async () => {
+    const view = render(
+      <InputBox
+        commands={createDefaultRegistry().listCommands()}
+        onSubmit={() => {}}
+      />,
+    );
+
+    view.stdin.write("/s");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(view.lastFrame()).toContain("/status");
+    expect(view.lastFrame()).toContain("/session");
+    view.unmount();
   });
 
   it("shows the active permission mode in the status bar", () => {

@@ -343,6 +343,39 @@ providers:
 
     expect(config.providers).toHaveLength(1);
   });
+
+  it("appends raw Hook entries from every configuration layer", async () => {
+    const userRoot = await mkdtemp(join(tmpdir(), "qicode-home-"));
+    const workRoot = await mkdtemp(join(tmpdir(), "qicode-work-"));
+    temporaryDirectories.push(userRoot, workRoot);
+    const provider = [
+      "providers:",
+      "  - name: main",
+      "    protocol: anthropic",
+      "    model: model",
+      "    base_url: https://example.com",
+      "    api_key: secret-value",
+    ].join("\n");
+    await writeLayer(userRoot, ".QiCode/config.yaml", [
+      provider,
+      "hooks:",
+      "  - event: pre_send",
+      "    action: { type: prompt, prompt: user rule }",
+    ].join("\n"));
+    await writeLayer(workRoot, ".QiCode/config.yaml", [
+      provider,
+      "hooks:",
+      "  - event: turn_start",
+      "    action: { type: prompt, prompt: project rule }",
+    ].join("\n"));
+
+    const config = await loadConfigLayers(workRoot, userRoot, {});
+
+    expect(config.hooks).toEqual([
+      { event: "pre_send", action: { type: "prompt", prompt: "user rule" } },
+      { event: "turn_start", action: { type: "prompt", prompt: "project rule" } },
+    ]);
+  });
 });
 
 describe("loadMcpConfigLayers", () => {

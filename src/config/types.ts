@@ -21,6 +21,11 @@ export interface MCPServerConfig {
 
 export interface AppConfig {
   providers: ProviderConfig[];
+  /**
+   * Hook 在第 2 阶段才做语义校验。配置层保留原始条目，避免单条坏规则
+   * 阻止其它合法规则进入 Hook 校验器。
+   */
+  hooks: unknown[];
 }
 
 export interface MCPConfig {

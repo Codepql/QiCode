@@ -82,7 +82,7 @@ export async function loadConfigLayers(
     join(workDir, ".QiCode", "config.yaml"),
     join(workDir, ".QiCode", "config.local.yaml"),
   ];
-  let merged: AppConfig = { providers: [] };
+  let merged: AppConfig = { providers: [], hooks: [] };
   let found = false;
 
   for (const path of new Set(paths)) {
@@ -106,6 +106,7 @@ function mergeConfig(base: AppConfig, override: AppConfig): AppConfig {
     providers: override.providers.length > 0
       ? override.providers.map(cloneProvider)
       : base.providers.map(cloneProvider),
+    hooks: [...base.hooks, ...override.hooks],
   };
 }
 
@@ -163,7 +164,9 @@ async function loadProviderConfigFile(
 
   const root = requireRecord(document, "configuration root");
   const rootFields = Object.keys(root);
-  const unsupportedRootField = rootFields.find((field) => field !== "providers");
+  const unsupportedRootField = rootFields.find(
+    (field) => field !== "providers" && field !== "hooks",
+  );
   if (unsupportedRootField) {
     throw new ConfigError(`Unsupported configuration field: ${unsupportedRootField}`);
   }
@@ -180,7 +183,8 @@ async function loadProviderConfigFile(
     },
   );
 
-  return { providers };
+  const hooks = parseOptionalArray(root, "hooks", "hooks");
+  return { providers, hooks };
 }
 
 async function loadMcpConfigFile(

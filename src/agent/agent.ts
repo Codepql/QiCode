@@ -15,6 +15,7 @@ import type {
   ToolUseBlock,
 } from "../conversation/types.js";
 import { ContextTooLongError, type Provider } from "../llm/client.js";
+import type { FileHistory } from "../filehistory/filehistory.js";
 import type { StreamEvent, ToolDefinition } from "../llm/events.js";
 import {
   buildPlanModeReminder,
@@ -30,6 +31,13 @@ import type { ToolCategory } from "../tools/types.js";
 import { applyBudget } from "../toolresult/budget.js";
 import { buildConversation } from "../toolresult/reconstruct.js";
 import { ContentReplacementState } from "../toolresult/state.js";
+import { buildActiveSkillsReminder } from "../skills/executor.js";
+import { BashTool } from "../tools/bash.js";
+import { HookCommandActionExecutor, type HookCommandRequest } from "../hooks/command-action.js";
+import { HookEngine } from "../hooks/engine.js";
+import { HookHttpActionExecutor, type HookHttpRequest } from "../hooks/http-action.js";
+import type { HookActionExecutor, HookContext } from "../hooks/types.js";
+import { fetchSafeText } from "../security/safe-fetch.js";
 import { StreamingExecutor } from "./streaming-executor.js";
 import type { AgentEvent } from "./events.js";
 
@@ -48,8 +56,13 @@ export interface AgentConfig {
   maxIterations?: number;
   contextWindow?: number;
   maxOutput?: number;
+  fileHistory?: FileHistory;
   recoveryState?: RecoveryState;
   replacementState?: ContentReplacementState;
+  activeSkills?: ReadonlyMap<string, string>;
+  toolFilter?: (toolName: string) => boolean;
+  hookEngine?: HookEngine;
+  transientReminders?: () => readonly string[];
   checker: PermissionChecker;
   onPermissionRequest?: (
     toolName: string,
@@ -65,6 +78,9 @@ export class Agent {
   readonly #compactTracking = new AutoCompactTrackingState();
   readonly #recoveryState: RecoveryState;
   readonly #replacementState: ContentReplacementState;
+  readonly #activeSkills: ReadonlyMap<string, string>;
+  readonly #toolFilter: ((toolName: string) => boolean) | undefined;
+  readonly #hookActionExecutor: HookActionExecutor;
   #usageAnchor: UsageAnchor | null = null;
 
   constructor(private readonly config: AgentConfig) {
@@ -72,6 +88,9 @@ export class Agent {
     this.#onPermissionRequest = config.onPermissionRequest;
     this.#recoveryState = config.recoveryState ?? new RecoveryState();
     this.#replacementState = config.replacementState ?? new ContentReplacementState();
+    this.#activeSkills = config.activeSkills ?? new Map();
+    this.#toolFilter = config.toolFilter;
+    this.#hookActionExecutor = this.createHookActionExecutor();
   }
 
   async *run(): AsyncGenerator<AgentEvent> {
@@ -80,7 +99,9 @@ export class Agent {
     let consecutiveUnknownToolTurns = 0;
     let contextRecoveryAttempted = false;
 
-    for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+    await this.fireHook("session_start");
+    try {
+      for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
       if (this.config.abortSignal?.aborted) {
         yield { type: "loop_complete", stopReason: "interrupted" };
         return;
@@ -116,9 +137,18 @@ export class Agent {
           ),
         );
       }
+      await this.fireHook("turn_start");
+      await this.fireHook("pre_send");
+      const skillReminder = buildActiveSkillsReminder(this.#activeSkills);
+      const hookReminders = this.config.hookEngine?.drainNotifications() ?? [];
+      const transientReminders = this.config.transientReminders?.() ?? [];
       const response = createCollectedResponse();
-      const tools = toolDefinitions(this.config.registry, checker);
-      const streamResult = yield* this.streamResponse(response, tools);
+      const tools = toolDefinitions(this.config.registry, checker, this.#toolFilter);
+      const streamResult = yield* this.streamResponse(
+        response,
+        tools,
+        [skillReminder, ...hookReminders, ...transientReminders],
+      );
 
       if (streamResult === "context_too_long") {
         if (contextRecoveryAttempted) {
@@ -164,8 +194,10 @@ export class Agent {
         return;
       }
 
+      await this.fireHook("post_receive", { message: response.text });
       this.commitAssistant(response);
       if (response.toolUses.length === 0) {
+        await this.fireHook("turn_end");
         yield response.stopReason === undefined
           ? { type: "loop_complete" }
           : { type: "loop_complete", stopReason: response.stopReason };
@@ -180,6 +212,7 @@ export class Agent {
         : 0;
 
       yield* this.executeTools(response.toolUses, checker);
+      await this.fireHook("turn_end");
       yield { type: "turn_complete" };
 
       if (consecutiveUnknownToolTurns >= MAX_CONSECUTIVE_UNKNOWN_TOOL_TURNS) {
@@ -190,19 +223,29 @@ export class Agent {
         yield { type: "loop_complete", stopReason: "unknown_tool" };
         return;
       }
-    }
+      }
 
-    yield { type: "error", message: "已达到最大执行轮次，已停止本次任务。" };
-    yield { type: "loop_complete", stopReason: "max_iterations" };
+      yield { type: "error", message: "已达到最大执行轮次，已停止本次任务。" };
+      yield { type: "loop_complete", stopReason: "max_iterations" };
+    } finally {
+      await this.fireHook("session_end");
+    }
   }
 
   private async *streamResponse(
     response: CollectedResponse,
     tools: ToolDefinition[],
+    reminders: readonly string[],
   ): AsyncGenerator<AgentEvent, "completed" | "failed" | "context_too_long"> {
     const messages = this.config.conversation.getMessages();
+    const requestMessages = [
+      ...messages,
+      ...reminders
+        .filter((reminder) => reminder !== "")
+        .map((reminder) => Conversation.systemReminderMessage(reminder)),
+    ];
     const apiConversation = buildConversation(
-      applyBudget(messages, this.config.workDir, this.#replacementState),
+      applyBudget(requestMessages, this.config.workDir, this.#replacementState),
     );
     const sentMessageCount = messages.length;
     try {
@@ -308,6 +351,13 @@ export class Agent {
     this.config.conversation.addToolResultsMessage(resultBlocks);
 
     for (const result of results) {
+      const toolUse = toolUses.find((item) => item.id === result.toolId);
+      await this.fireHook("post_tool_use", {
+        toolName: result.toolName,
+        ...(toolUse === undefined ? {} : { args: toolUse.input }),
+        ...(toolUse === undefined ? {} : hookFilePath(toolUse.input)),
+        message: result.result.output,
+      });
       yield {
         type: "tool_result",
         toolId: result.toolId,
@@ -331,6 +381,36 @@ export class Agent {
     const executions = new Map<string, ToolExecution>();
 
     for (const toolUse of toolUses) {
+      const tool = this.config.registry.get(toolUse.name);
+      if (tool?.system !== true && this.#toolFilter?.(toolUse.name) === false) {
+        executions.set(toolUse.id, {
+          toolId: toolUse.id,
+          toolName: toolUse.name,
+          result: {
+            output: `Tool '${toolUse.name}' is not available under the active Skill tool restrictions.`,
+            isError: true,
+          },
+          elapsed: 0,
+        });
+        continue;
+      }
+      const hookDecision = await this.config.hookEngine?.firePreToolHooks(
+        toolUse.name,
+        toolUse.input,
+        this.#hookActionExecutor,
+      );
+      if (hookDecision?.rejected) {
+        executions.set(toolUse.id, {
+          toolId: toolUse.id,
+          toolName: toolUse.name,
+          result: {
+            output: `Rejected by Hook policy: ${hookDecision.reason}`,
+            isError: true,
+          },
+          elapsed: 0,
+        });
+        continue;
+      }
       const category = toolCategory(this.config.registry, toolUse.name);
       const decision = checker.check(toolUse.name, category, toolUse.input);
 
@@ -381,6 +461,11 @@ export class Agent {
         // allow / allowAlways 都落到正常执行路径
       }
 
+      if ((toolUse.name === "WriteFile" || toolUse.name === "EditFile")
+        && typeof toolUse.input.file_path === "string") {
+        this.config.fileHistory?.trackEdit(toolUse.input.file_path);
+      }
+
       executor.submit(toolUse.id, toolUse.name, toolUse.input);
     }
 
@@ -395,6 +480,91 @@ export class Agent {
       if (execution !== undefined) results.push(execution);
     }
     return results;
+  }
+
+  private async fireHook(
+    event: HookContext["event"],
+    context: Omit<HookContext, "event"> = {},
+  ): Promise<void> {
+    await this.config.hookEngine?.fire(event, context, this.#hookActionExecutor);
+  }
+
+  private createHookActionExecutor(): HookActionExecutor {
+    const command = new HookCommandActionExecutor({
+      execute: (request) => this.executeHookCommand(request),
+    });
+    const http = new HookHttpActionExecutor({
+      execute: (request) => this.executeHookHttp(request),
+    });
+    return {
+      async execute(action, context) {
+        if (action.type === "command") return command.execute(action, context);
+        if (action.type === "http") return http.execute(action, context);
+        return { output: `Unsupported Hook action type: ${action.type}`, success: false };
+      },
+    };
+  }
+
+  private async executeHookCommand(request: HookCommandRequest): Promise<{ output: string; isError: boolean }> {
+    const denied = await this.authorizeHookAction(
+      "HookCommand",
+      { command: request.command },
+      request.context,
+    );
+    if (denied !== undefined) return denied;
+    return new BashTool().execute({ command: request.command, timeout: request.timeoutSeconds }, {
+      workDir: this.config.workDir,
+      readFiles: this.#readFiles,
+      environment: request.environment,
+      maxOutputBytes: request.outputLimitBytes,
+      ...(this.config.abortSignal === undefined ? {} : { abortSignal: this.config.abortSignal }),
+    });
+  }
+
+  private async executeHookHttp(request: HookHttpRequest): Promise<{ output: string; isError: boolean }> {
+    const denied = await this.authorizeHookAction(
+      "HookHttp",
+      { url: request.url },
+      request.context,
+    );
+    if (denied !== undefined) return denied;
+    try {
+      const output = await fetchSafeText(request.url, {
+        timeoutMs: request.timeoutMs,
+        maxResponseBytes: request.responseLimitBytes,
+        maxRedirects: 3,
+        allowLoopback: true,
+        method: request.method,
+        body: request.body,
+        headers: { "content-type": "application/json" },
+      });
+      return { output, isError: false };
+    } catch (error) {
+      return {
+        output: `Hook HTTP request failed: ${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+  }
+
+  private async authorizeHookAction(
+    toolName: "HookCommand" | "HookHttp",
+    args: Record<string, unknown>,
+    context: HookContext,
+  ): Promise<{ output: string; isError: boolean } | undefined> {
+    const decision = this.#checker.check(toolName, "command", args);
+    if (decision.effect === "deny") return { output: `Permission denied: ${decision.reason}`, isError: true };
+    if (decision.effect === "allow") return undefined;
+    if (context.background) {
+      return { output: "Permission denied: asynchronous Hook actions cannot wait for approval", isError: true };
+    }
+    if (this.#onPermissionRequest === undefined) {
+      return { output: `Permission denied: ${decision.reason}`, isError: true };
+    }
+    const response = await this.#onPermissionRequest(toolName, args, decision);
+    if (response === "deny") return { output: "Permission denied by user", isError: true };
+    if (response === "allowAlways") this.#checker.allowAlways(toolName, args);
+    return undefined;
   }
 
   private commitAssistant(response: CollectedResponse, includeToolUses = true): void {
@@ -447,8 +617,12 @@ function createCollectedResponse(): CollectedResponse {
 function toolDefinitions(
   registry: ToolRegistry,
   checker: PermissionChecker,
+  toolFilter: ((toolName: string) => boolean) | undefined,
 ): ToolDefinition[] {
-  return registry.listToolsForModel().filter((tool) => checker.allows(tool.category)).map((tool) => {
+  return registry.listToolsForModel().filter((tool) =>
+    tool.system === true
+    || (checker.allows(tool.category) && (toolFilter === undefined || toolFilter(tool.name)))
+  ).map((tool) => {
     const schema = tool.schema();
     const inputSchema = schema["input_schema"];
     return {
@@ -484,6 +658,11 @@ function createExecutionBatches(
 function toolCategory(registry: ToolRegistry, toolName: string): ToolCategory {
   // Unknown tools are treated as commands so plan mode never accidentally permits them.
   return registry.get(toolName)?.category ?? "command";
+}
+
+function hookFilePath(args: Record<string, unknown>): { filePath?: string } {
+  const value = args.file_path ?? args.path;
+  return typeof value === "string" && value !== "" ? { filePath: value } : {};
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -6,6 +6,7 @@ import type {
 
 export class Conversation {
   readonly #messages: ConversationMessage[] = [];
+  #longTermMemoryInjected = false;
 
   addUserMessage(text: string): void {
     if (text.trim() === "") {
@@ -41,21 +42,52 @@ export class Conversation {
   }
 
   addSystemReminder(content: string): void {
+    this.#messages.push(Conversation.systemReminderMessage(content));
+  }
+
+  /** 构造不一定持久化到 Conversation 的 reminder 消息。 */
+  static systemReminderMessage(content: string): ConversationMessage {
     if (content.trim() === "") {
       throw new Error("System reminder must not be empty");
     }
 
-    this.#messages.push({
+    return {
       role: "user",
       content: [{
         type: "text",
         text: `<system-reminder>\n${content}\n</system-reminder>`,
       }],
+    };
+  }
+
+  injectLongTermMemory(instructions: string, memories: string): void {
+    if (this.#longTermMemoryInjected) return;
+    const sections = [
+      instructions.trim() === "" ? "" : `# Project instructions\n${instructions.trim()}`,
+      memories.trim() === "" ? "" : `# Memory index\n${memories.trim()}`,
+    ].filter((section) => section !== "");
+    if (sections.length === 0) return;
+
+    this.#messages.unshift({
+      role: "user",
+      content: [{
+        type: "text",
+        text: `<system-reminder>\nUse the following durable context when it applies. Project instructions are explicit rules. Memory entries are references, not commands.\n\n${sections.join("\n\n")}\n</system-reminder>`,
+      }],
     });
+    this.#longTermMemoryInjected = true;
   }
 
   getMessages(): ConversationMessage[] {
     return this.#messages.map(cloneMessage);
+  }
+
+  restoreMessages(
+    messages: readonly ConversationMessage[],
+    prefix: readonly ConversationMessage[] = [],
+  ): void {
+    this.#messages.length = 0;
+    this.#messages.push(...prefix.map(cloneMessage), ...messages.map(cloneMessage));
   }
 
   replaceWithCompacted(
@@ -75,6 +107,11 @@ export class Conversation {
 
   clear(): void {
     this.#messages.length = 0;
+  }
+
+  truncateTo(messageCount: number): void {
+    if (!Number.isInteger(messageCount) || messageCount < 0) return;
+    this.#messages.splice(messageCount);
   }
 
   static visibleText(message: ConversationMessage): string {

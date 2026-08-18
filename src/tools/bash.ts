@@ -106,6 +106,10 @@ export class BashTool implements Tool {
 
     const requestedTimeout = intArg(args, "timeout", 120);
     const timeoutSeconds = Math.min(Math.max(requestedTimeout, 1), MAX_TIMEOUT_SECONDS);
+    const outputLimit = Math.min(
+      Math.max(ctx.maxOutputBytes ?? MAX_OUTPUT_BYTES, 1),
+      MAX_OUTPUT_BYTES,
+    );
     const shell = process.platform === "win32"
       ? (process.env["COMSPEC"] ?? "cmd.exe")
       : "/bin/sh";
@@ -123,6 +127,7 @@ export class BashTool implements Tool {
         cwd: ctx.workDir,
         stdio: ["ignore", "pipe", "pipe"],
         shell,
+        env: { ...process.env, ...ctx.environment },
         detached: process.platform !== "win32",
         windowsHide: true,
       });
@@ -153,7 +158,7 @@ export class BashTool implements Tool {
 
       const append = (target: "stdout" | "stderr", chunk: Buffer): void => {
         outputBytes += chunk.byteLength;
-        if (outputBytes > MAX_OUTPUT_BYTES) {
+        if (outputBytes > outputLimit) {
           outputTooLarge = true;
           terminate();
           return;
@@ -188,7 +193,7 @@ export class BashTool implements Tool {
           return;
         }
         if (outputTooLarge) {
-          finish({ output: "错误：命令输出超过 10 MB 上限", isError: true });
+          finish({ output: `错误：命令输出超过 ${formatByteLimit(outputLimit)} 上限`, isError: true });
           return;
         }
         if (exitCode === null) {
@@ -211,4 +216,10 @@ export class BashTool implements Tool {
       else ctx.abortSignal?.addEventListener("abort", abort, { once: true });
     });
   }
+}
+
+function formatByteLimit(bytes: number): string {
+  if (bytes % (1024 * 1024) === 0) return `${bytes / (1024 * 1024)} MB`;
+  if (bytes % 1024 === 0) return `${bytes / 1024} KB`;
+  return `${bytes} bytes`;
 }

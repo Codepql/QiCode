@@ -1,8 +1,21 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import {
+  appendFileSync,
+  type Dirent,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { ConversationBlock } from "../conversation/types.js";
 
 export const COMPACT_BOUNDARY = "compact_boundary";
+export const SESSION_EXPIRY_DAYS = 30;
+const SESSION_FILE_EXTENSION = ".jsonl";
+const FIRST_MESSAGE_MAX_CHARS = 100;
 
 export interface SessionMessage {
   role: "user" | "assistant" | "system";
@@ -27,9 +40,25 @@ export interface RestoredMessage {
   content: ConversationBlock[];
 }
 
+export interface SessionInfo {
+  id: string;
+  firstMessage: string;
+  messageCount: number;
+  size: number;
+  modTime: Date;
+}
+
+export function newSessionId(): string {
+  return `${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
+}
+
+export function sessionsDir(workDir: string): string {
+  return join(workDir, ".qicode", "sessions");
+}
+
 export function getSessionFilePath(workDir: string, sessionId: string): string {
   validateSessionId(sessionId);
-  return join(workDir, ".qicode", "sessions", `${sessionId}.jsonl`);
+  return join(sessionsDir(workDir), `${sessionId}${SESSION_FILE_EXTENSION}`);
 }
 
 export function saveMessage(
@@ -38,7 +67,7 @@ export function saveMessage(
   message: SessionMessage,
 ): void {
   const path = getSessionFilePath(workDir, sessionId);
-  mkdirSync(join(workDir, ".qicode", "sessions"), { recursive: true });
+  mkdirSync(sessionsDir(workDir), { recursive: true });
   appendFileSync(path, `${JSON.stringify(message)}\n`, "utf8");
 }
 
@@ -61,7 +90,70 @@ export function loadSession(workDir: string, sessionId: string): SessionMessage[
   return readFileSync(path, "utf8")
     .split("\n")
     .filter((line) => line.trim() !== "")
-    .flatMap(parseSessionMessage);
+    .flatMap(parseSessionMessage)
+    .filter((message) => message.type === COMPACT_BOUNDARY || message.content.trim() !== "");
+}
+
+export function listSessions(workDir: string): SessionInfo[] {
+  const directory = sessionsDir(workDir);
+  if (!existsSync(directory)) return [];
+
+  let entries: Dirent<string>[];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  return entries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(SESSION_FILE_EXTENSION))
+    .flatMap((entry) => {
+      const id = entry.name.slice(0, -SESSION_FILE_EXTENSION.length);
+      try {
+        validateSessionId(id);
+        const filePath = getSessionFilePath(workDir, id);
+        const stat = statSync(filePath);
+        const messages = loadSession(workDir, id);
+        return [{
+          id,
+          firstMessage: findFirstUserMessage(messages),
+          messageCount: messages.length,
+          size: stat.size,
+          modTime: stat.mtime,
+        }];
+      } catch {
+        return [];
+      }
+    })
+    .sort((left, right) => right.modTime.getTime() - left.modTime.getTime());
+}
+
+export function cleanExpiredSessions(workDir: string, now = new Date()): number {
+  const directory = sessionsDir(workDir);
+  if (!existsSync(directory)) return 0;
+
+  let entries: Dirent<string>[];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+
+  const expiryMs = SESSION_EXPIRY_DAYS * 24 * 60 * 60 * 1000;
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith(SESSION_FILE_EXTENSION)) continue;
+    try {
+      const filePath = join(directory, entry.name);
+      if (now.getTime() - statSync(filePath).mtimeMs > expiryMs) {
+        unlinkSync(filePath);
+        removed += 1;
+      }
+    } catch {
+      // Expiration is housekeeping: one inaccessible file must not stop the sweep.
+    }
+  }
+  return removed;
 }
 
 export function rebuildFromSession(saved: readonly SessionMessage[]): RestoredMessage[] {
@@ -129,6 +221,15 @@ function replayMessages(saved: readonly SessionMessage[]): RestoredMessage[] {
       ? [{ role: message.role, content: [{ type: "text", text: message.content }] }]
       : []
   ));
+}
+
+function findFirstUserMessage(messages: readonly SessionMessage[]): string {
+  const first = messages.find((message) => (
+    message.role === "user" && message.content.trim() !== ""
+  ));
+  return first === undefined
+    ? "(no user message)"
+    : first.content.trim().slice(0, FIRST_MESSAGE_MAX_CHARS);
 }
 
 function buildResumeSummary(summary: string, keptCount: number): string {

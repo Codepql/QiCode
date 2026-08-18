@@ -1,4 +1,7 @@
 import React from "react";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { render } from "ink-testing-library";
 import { describe, expect, it, vi } from "vitest";
 import type { ProviderConfig } from "../../src/config/types.js";
@@ -6,7 +9,8 @@ import type { ChatRequest, Provider } from "../../src/llm/client.js";
 import type { MCPClient } from "../../src/mcp/client.js";
 import type { MCPManager } from "../../src/mcp/manager.js";
 import type { EnvironmentContext } from "../../src/prompt/sections.js";
-import { App, initializeAgentRuntime } from "../../src/tui/app.js";
+import { App, initializeAgentRuntime, mergeForkUiMessages } from "../../src/tui/app.js";
+import type { ConversationMessage } from "../../src/conversation/types.js";
 
 const providerConfig: ProviderConfig = {
   name: "test",
@@ -18,6 +22,21 @@ const providerConfig: ProviderConfig = {
 };
 
 describe("App", () => {
+  it("keeps a fork result between the parent messages that happened before and after it", () => {
+    const message = (text: string): ConversationMessage => ({
+      role: "assistant",
+      content: [{ type: "text", text }],
+    });
+
+    const merged = mergeForkUiMessages(
+      [message("before"), message("after")],
+      [{ afterMessageCount: 1, message: message("fork") }],
+    );
+
+    expect(merged.map((item) => item.content[0]?.type === "text" && item.content[0].text))
+      .toEqual(["before", "fork", "after"]);
+  });
+
   it("renders the real input for a single configured provider", () => {
     const view = render(<App providers={[providerConfig]} />);
 
@@ -25,6 +44,19 @@ describe("App", () => {
     expect(view.lastFrame()).toContain("test-model");
     expect(view.lastFrame()).not.toContain("openai · test-model");
     expect(view.lastFrame()).not.toContain("Static preview only");
+  });
+
+  it("shows invalid Hook configuration as a local notice", async () => {
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        hooks={[{ event: "invalid", action: { type: "prompt", prompt: "ignored" } }]}
+      />,
+    );
+
+    await waitFor(() => (view.lastFrame() ?? "").includes("Hook configuration"));
+    expect(view.lastFrame()).toContain("invalid event 'invalid'");
+    view.unmount();
   });
 
   it("builds a runtime prompt from the detected environment and selected model", async () => {
@@ -69,17 +101,52 @@ describe("App", () => {
     view.stdin.write("first");
     await waitFor(() => (view.lastFrame() ?? "").includes("first"));
     view.stdin.write("\r");
-    await waitFor(() => requests.length === 1);
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "stable-system-prompt").length === 1);
     view.stdin.write("second");
     await waitFor(() => (view.lastFrame() ?? "").includes("second"));
     view.stdin.write("\r");
-    await waitFor(() => requests.length === 2);
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "stable-system-prompt").length === 2);
 
     expect(runtimeFactory).toHaveBeenCalledTimes(1);
-    expect(requests.map((request) => request.systemPrompt)).toEqual([
+    expect(requests
+      .filter((request) => request.systemPrompt === "stable-system-prompt")
+      .map((request) => request.systemPrompt)).toEqual([
       "stable-system-prompt",
       "stable-system-prompt",
     ]);
+    view.unmount();
+  });
+
+  it("keeps once Hook state across App re-renders", async () => {
+    const requests: ChatRequest[] = [];
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        workDir="/workspace"
+        hooks={[{
+          event: "pre_send",
+          action: { type: "prompt", prompt: "once only" },
+          once: true,
+        }]}
+        runtimeFactory={vi.fn(async () => ({
+          provider: fakeProvider(requests),
+          systemPrompt: "system",
+        }))}
+      />,
+    );
+
+    view.stdin.write("first");
+    await waitFor(() => (view.lastFrame() ?? "").includes("first"));
+    view.stdin.write("\r");
+    await waitFor(() => requests.length >= 1);
+    view.stdin.write("second");
+    await waitFor(() => (view.lastFrame() ?? "").includes("second"));
+    view.stdin.write("\r");
+    await waitFor(() => requests.length >= 2);
+
+    expect(requests).toHaveLength(2);
+    expect(requests.filter((request) => JSON.stringify(request.messages).includes("once only")))
+      .toHaveLength(1);
     view.unmount();
   });
 
@@ -89,6 +156,58 @@ describe("App", () => {
     );
 
     expect(view.lastFrame()).toContain("default");
+    view.unmount();
+  });
+
+  it("handles local slash commands without starting an agent request", async () => {
+    const requests: ChatRequest[] = [];
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-app-"));
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        workDir={workDir}
+        runtimeFactory={vi.fn(async () => ({
+          provider: fakeProvider(requests),
+          systemPrompt: "system",
+        }))}
+      />,
+    );
+
+    view.stdin.write("/status");
+    await waitFor(() => (view.lastFrame() ?? "").includes("/status"));
+    view.stdin.write("\r");
+    await waitFor(() => (view.lastFrame() ?? "").includes("QiCode Status"));
+
+    expect(requests).toEqual([]);
+    view.unmount();
+  });
+
+  it("turns prompt slash commands into a normal agent request and consumes unknown commands", async () => {
+    const requests: ChatRequest[] = [];
+    const view = render(
+      <App
+        providers={[providerConfig]}
+        workDir="/workspace"
+        runtimeFactory={vi.fn(async () => ({
+          provider: fakeProvider(requests),
+          systemPrompt: "system",
+        }))}
+      />,
+    );
+
+    view.stdin.write("/review auth");
+    await waitFor(() => (view.lastFrame() ?? "").includes("/review auth"));
+    view.stdin.write("\r");
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "system").length === 1);
+    const agentRequest = requests.find((request) => request.systemPrompt === "system");
+    expect(JSON.stringify(agentRequest?.messages)).toContain("Focus on: auth");
+    await waitFor(() => (view.lastFrame() ?? "").includes("done"));
+
+    view.stdin.write("/unknown-command");
+    await waitFor(() => (view.lastFrame() ?? "").includes("/unknown-command"));
+    view.stdin.write("\r");
+    await waitFor(() => (view.lastFrame() ?? "").includes("Unknown command: /unknown-command"));
+    expect(requests.filter((request) => request.systemPrompt === "system")).toHaveLength(1);
     view.unmount();
   });
 
@@ -139,12 +258,13 @@ describe("App", () => {
     view.stdin.write("hello");
     await waitFor(() => (view.lastFrame() ?? "").includes("hello"));
     view.stdin.write("\r");
-    await waitFor(() => requests.length === 1);
-    expect(requests[0]?.tools?.map((tool) => tool.name)).toContain("ToolSearch");
-    expect(requests[0]?.tools?.map((tool) => tool.name)).not.toContain(
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "system").length === 1);
+    const agentRequest = requests.find((request) => request.systemPrompt === "system");
+    expect(agentRequest?.tools?.map((tool) => tool.name)).toContain("ToolSearch");
+    expect(agentRequest?.tools?.map((tool) => tool.name)).not.toContain(
       "mcp__github__create_issue",
     );
-    expect(requests[0]?.messages.some((message) =>
+    expect(agentRequest?.messages.some((message) =>
       message.content.some((block) =>
         block.type === "text" && block.text.includes("# MCP Server: github")
       )
@@ -183,8 +303,9 @@ describe("App", () => {
     view.stdin.write("hello");
     await waitFor(() => (view.lastFrame() ?? "").includes("hello"));
     view.stdin.write("\r");
-    await waitFor(() => requests.length === 1);
-    expect(JSON.stringify(requests[0]?.messages)).not.toContain("offline");
+    await waitFor(() => requests.filter((request) => request.systemPrompt === "system").length === 1);
+    const agentRequest = requests.find((request) => request.systemPrompt === "system");
+    expect(JSON.stringify(agentRequest?.messages)).not.toContain("offline");
     view.unmount();
   });
 });
