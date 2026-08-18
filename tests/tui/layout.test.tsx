@@ -84,6 +84,26 @@ describe("TUI layout", () => {
     expect(view.lastFrame()).not.toMatch(/[╭╮╰╯─]/);
   });
 
+  it("keeps manual scroll position and supports arrow-key scrolling", async () => {
+    const messages: ConversationMessage[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      messages.push(
+        { role: "user", content: [{ type: "text", text: `question-${index}` }] },
+        { role: "assistant", content: [{ type: "text", text: `answer-${index}` }] },
+      );
+    }
+    const view = render(<ChatView messages={messages} maxHeight={5} />);
+
+    view.stdin.write("\u001b[H");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(view.lastFrame()).toContain("question-0");
+
+    for (let index = 0; index < 80; index += 1) view.stdin.write("\u001b[B");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(view.lastFrame()).toContain("question-11");
+    view.unmount();
+  });
+
   it("shows slash completion candidates for a command prefix", async () => {
     const view = render(
       <InputBox

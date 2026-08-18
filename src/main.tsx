@@ -11,30 +11,38 @@ import {
   loadMcpConfigLayers,
   resolveConfigPath,
 } from "./config/load-config.js";
+import { parseTeammateFlags, runTeammate } from "./teammate.js";
 import { App } from "./tui/app.js";
 export { VERSION, versionText } from "./version.js";
 
 const entryPath = process.argv[1];
 if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
+  void main();
+}
+
+async function main(): Promise<void> {
   const args = process.argv.slice(2);
-  loadStartupConfig(args)
-    .then(async (config) => {
-      const mcpConfig = await loadMcpConfigLayers();
-      return { config, mcpConfig };
-    })
-    .then(({ config, mcpConfig }) => render(
+  const teammateArgs = parseTeammateFlags(args);
+  try {
+    if (teammateArgs !== null) {
+      await runTeammate(teammateArgs);
+      return;
+    }
+    const config = await loadStartupConfig(args);
+    const mcpConfig = await loadMcpConfigLayers();
+    render(
       <App
         providers={config.providers}
         mcpServers={mcpConfig.mcp_servers}
         hooks={config.hooks}
       />,
       { exitOnCtrlC: false },
-    ))
-    .catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : "Unable to load configuration";
-      process.stderr.write(`${message}\n`);
-      process.exitCode = 1;
-    });
+    );
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : "Unable to load configuration";
+    process.stderr.write(`${message}\n`);
+    process.exitCode = 1;
+  }
 }
 
 async function loadStartupConfig(args: readonly string[]) {
