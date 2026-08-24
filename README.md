@@ -43,9 +43,9 @@ QiCode 是一个基于 TypeScript 的终端 AI Coding Agent ...
 从 npm 安装 CLI：
 
 ```bash
-npm install --global @codepql/qicode
+npm install --global @coderpql/qicode
 # 或
-pnpm add --global @codepql/qicode
+pnpm add --global @coderpql/qicode
 ```
 
 安装后进入任意项目目录，直接运行：
