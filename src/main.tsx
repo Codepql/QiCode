@@ -13,6 +13,8 @@ import {
 } from "./config/load-config.js";
 import { parseTeammateFlags, runTeammate } from "./teammate.js";
 import { App } from "./tui/app.js";
+import { initializeProject } from "./cli/init.js";
+import { VERSION, versionText } from "./version.js";
 export { VERSION, versionText } from "./version.js";
 
 const entryPath = process.argv[1];
@@ -24,6 +26,21 @@ async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const teammateArgs = parseTeammateFlags(args);
   try {
+    if (args[0] === "--help" || args[0] === "-h") {
+      process.stdout.write(helpText());
+      return;
+    }
+    if (args[0] === "--version" || args[0] === "-v") {
+      process.stdout.write(`${versionText()}\n`);
+      return;
+    }
+    if (args[0] === "init") {
+      const created = await initializeProject(process.cwd());
+      process.stdout.write(created.length === 0
+        ? "QiCode project files already exist.\n"
+        : `QiCode project initialized:\n${created.map((path) => `  ${path}`).join("\n")}\n`);
+      return;
+    }
     if (teammateArgs !== null) {
       await runTeammate(teammateArgs);
       return;
@@ -43,6 +60,20 @@ async function main(): Promise<void> {
     process.stderr.write(`${message}\n`);
     process.exitCode = 1;
   }
+}
+
+function helpText(): string {
+  return [
+    "QiCode - terminal-first AI coding agent",
+    "",
+    "Usage:",
+    "  qicode                 Start QiCode in the current project",
+    "  qicode init            Create project configuration templates",
+    "  qicode --config FILE  Start with an explicit configuration file",
+    "  qicode --version       Show the installed version",
+    "  qicode --help          Show this help",
+    "",
+  ].join("\n");
 }
 
 async function loadStartupConfig(args: readonly string[]) {

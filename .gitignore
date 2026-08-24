@@ -5,9 +5,13 @@ coverage/
 *.log
 
 .QiCode/*
+!.QiCode/config.example.yaml
+!.QiCode/mcp-config/
+.QiCode/mcp-config/*
+!.QiCode/mcp-config/config.example.yaml
+.QiCode/config.local.yaml
+.QiCode/mcp-config/config.local.yaml
 config.local.yaml
 .env
 .env.*
 !.env.example
-
-.qicode/

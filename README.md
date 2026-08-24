@@ -40,20 +40,33 @@ QiCode 是一个基于 TypeScript 的终端 AI Coding Agent ...
 
 ## Installation
 
-QiCode 当前以源码方式运行，尚未发布到 npm。
+从 npm 安装 CLI：
 
 ```bash
-git clone <your-fork-or-repository-url>
-cd QiCode
-pnpm install
+npm install --global @codepql/qicode
+# 或
+pnpm add --global @codepql/qicode
+```
+
+安装后进入任意项目目录，直接运行：
+
+```bash
+qicode
+```
+
+首次使用建议先生成项目模板：
+
+```bash
+qicode init
 ```
 
 ## Configuration
 
-QiCode 按以下顺序查找配置：
+QiCode 按以下顺序查找 Provider 配置：
 
-1. `<project>/.QiCode/config.yaml`
-2. `~/.QiCode/config.yaml`
+1. `~/.QiCode/config.yaml`
+2. `<project>/.QiCode/config.yaml`
+3. `<project>/.QiCode/config.local.yaml`
 
 也可以显式指定配置文件：
 
@@ -61,7 +74,15 @@ QiCode 按以下顺序查找配置：
 pnpm dev -- --config path/to/config.yaml
 ```
 
-创建 `.QiCode/config.yaml`：
+普通用户只需在 `<project>/.QiCode/config.local.yaml` 填写三个字段：
+
+```yaml
+base_url: https://api.example.com/v1
+token: your-api-token
+model: deepseek-v4-flash
+```
+
+`protocol` 默认是 `openai`，适用于 OpenAI Chat Completions 及兼容服务。需要 Anthropic 或多个 Provider 时，使用完整格式：
 
 ```yaml
 providers:
@@ -81,13 +102,34 @@ providers:
 
 `protocol` 只能是 `anthropic` 或 `openai`。OpenAI 兼容服务同样使用 `openai`，通过 `base_url` 区分。
 
-建议将 API Key 放进环境变量，而不是写入配置文件。`.QiCode/config.yaml` 已被 `.gitignore` 忽略，不要提交真实密钥。
+建议将 token 放进环境变量，通过 `${TOKEN_ENV_NAME}` 引用，而不是写入配置文件。不要提交 `config.local.yaml`。
+
+## Skills and MCP
+
+Skill 与 MCP 不放在 Provider 配置中，目录彼此独立：
+
+```text
+~/.QiCode/skills/                         # 所有项目可用的个人 Skill
+<project>/.QiCode/skills/                 # 仅当前项目使用的 Skill
+~/.QiCode/mcp-config/config.yaml          # 个人 MCP
+<project>/.QiCode/mcp-config/config.yaml  # 项目共享 MCP
+<project>/.QiCode/mcp-config/config.local.yaml # 私密 MCP token/headers
+```
+
+Skill 文件使用目录形式 `skills/<name>/SKILL.md`。MCP 配置使用 `mcp_servers` 数组；命令型 MCP 填 `command`/`args`，远程 MCP 填 `url`/`transport`。`config.local.yaml` 适合放 token、headers 和本机路径，不应提交到 Git。
 
 ## Usage
 
-启动开发版：
+启动已安装版本：
 
 ```bash
+qicode
+```
+
+从源码开发：
+
+```bash
+pnpm install
 pnpm dev
 ```
 
@@ -187,4 +229,4 @@ pnpm build
 
 ## License
 
-项目计划采用 MIT License。正式公开发布前会补充 `LICENSE` 文件。
+项目采用 MIT License，详见 [LICENSE](LICENSE)。
