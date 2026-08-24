@@ -6,6 +6,17 @@ const CONFIG_TEMPLATE = `# QiCode configuration
 base_url: https://api.example.com/v1
 token: your-api-token
 model: deepseek-v4-flash
+
+# Optional: Claude / Anthropic configuration.
+# Replace the three fields above with this complete providers block when using
+# Anthropic's Messages API, then remove the leading "#" from each line.
+# providers:
+#   - name: claude
+#     protocol: anthropic
+#     model: claude-sonnet-4-20250514
+#     base_url: https://api.anthropic.com
+#     api_key: sk-ant-xxx
+#     thinking: true
 `;
 
 const MCP_CONFIG_TEMPLATE = `# MCP server configuration.

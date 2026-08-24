@@ -10,6 +10,7 @@ import type { MCPClient } from "../../src/mcp/client.js";
 import type { MCPManager } from "../../src/mcp/manager.js";
 import type { EnvironmentContext } from "../../src/prompt/sections.js";
 import { App, initializeAgentRuntime, mergeForkUiMessages } from "../../src/tui/app.js";
+import { VERSION } from "../../src/version.js";
 import type { ConversationMessage } from "../../src/conversation/types.js";
 
 const providerConfig: ProviderConfig = {
@@ -40,7 +41,7 @@ describe("App", () => {
   it("renders the real input for a single configured provider", () => {
     const view = render(<App providers={[providerConfig]} />);
 
-    expect(view.lastFrame()).toContain("QiCode v0.1.0");
+    expect(view.lastFrame()).toContain(`QiCode v${VERSION}`);
     expect(view.lastFrame()).toContain("test-model");
     expect(view.lastFrame()).not.toContain("openai · test-model");
     expect(view.lastFrame()).not.toContain("Static preview only");
