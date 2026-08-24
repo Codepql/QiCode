@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { pathToFileURL } from "node:url";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -18,11 +17,14 @@ import { VERSION, versionText } from "./version.js";
 export { VERSION, versionText } from "./version.js";
 
 const entryPath = process.argv[1];
-if (entryPath && import.meta.url === pathToFileURL(entryPath).href) {
+// npm's Windows and Git Bash shims can normalize the path differently from import.meta.url.
+// The executed script name is stable, while test imports have a test runner as argv[1].
+if (entryPath && /(?:^|[\\/])main\.(?:js|tsx)$/.test(entryPath)) {
   void main();
 }
 
 async function main(): Promise<void> {
+  const workDir = process.cwd();
   const args = process.argv.slice(2);
   const teammateArgs = parseTeammateFlags(args);
   try {
@@ -35,7 +37,7 @@ async function main(): Promise<void> {
       return;
     }
     if (args[0] === "init") {
-      const created = await initializeProject(process.cwd());
+      const created = await initializeProject(workDir);
       process.stdout.write(created.length === 0
         ? "QiCode project files already exist.\n"
         : `QiCode project initialized:\n${created.map((path) => `  ${path}`).join("\n")}\n`);
@@ -52,6 +54,7 @@ async function main(): Promise<void> {
         providers={config.providers}
         mcpServers={mcpConfig.mcp_servers}
         hooks={config.hooks}
+        workDir={workDir}
       />,
       { exitOnCtrlC: false },
     );

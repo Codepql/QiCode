@@ -5,7 +5,7 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import {
   basename,
   dirname,
@@ -210,7 +210,7 @@ function realPathOf(target: string): string {
 }
 
 /**
- * 路径沙箱：只允许项目根与其子树、约定临时目录子树内的路径。
+ * 路径沙箱：只允许项目根与其子树内的路径。
  * 用「逻辑路径 -> 绝对路径 -> 真实路径」三层校验，阻止 ../ 穿越、前缀碰撞和符号链接逃逸。
  * check() 返回 null 表示放行，返回 Decision 表示拒绝；空路径不伪造结论。
  */
@@ -222,7 +222,6 @@ export class PathSandbox {
     this.#projectDir = projectDir;
     this.#roots = [];
     this.addRoot(projectDir);
-    this.addRoot(tmpdir());
   }
 
   /** 追加一个允许根目录（会先解析成真实路径）。 */
