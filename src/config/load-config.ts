@@ -19,6 +19,8 @@ const PROVIDER_FIELDS = new Set([
   "thinking",
 ]);
 
+const SIMPLE_CONFIG_FIELDS = new Set(["base_url", "token", "model"]);
+
 const MCP_SERVER_FIELDS = new Set([
   "name",
   "command",
@@ -165,7 +167,7 @@ async function loadProviderConfigFile(
   const root = requireRecord(document, "configuration root");
   const rootFields = Object.keys(root);
   const unsupportedRootField = rootFields.find(
-    (field) => field !== "providers" && field !== "hooks",
+    (field) => field !== "providers" && field !== "hooks" && !SIMPLE_CONFIG_FIELDS.has(field),
   );
   if (unsupportedRootField) {
     throw new ConfigError(`Unsupported configuration field: ${unsupportedRootField}`);
@@ -183,8 +185,40 @@ async function loadProviderConfigFile(
     },
   );
 
+  const simpleProvider = parseSimpleProvider(root, environment);
+  if (simpleProvider !== undefined) {
+    if (providers.length > 0) {
+      throw new ConfigError("Use either providers or base_url/token/model, not both");
+    }
+    providers.push(simpleProvider);
+  }
+
   const hooks = parseOptionalArray(root, "hooks", "hooks");
   return { providers, hooks };
+}
+
+function parseSimpleProvider(
+  root: Record<string, unknown>,
+  environment: NodeJS.ProcessEnv,
+): ProviderConfig | undefined {
+  const hasSimpleField = [...SIMPLE_CONFIG_FIELDS].some((field) => root[field] !== undefined);
+  if (!hasSimpleField) return undefined;
+
+  for (const field of SIMPLE_CONFIG_FIELDS) {
+    if (typeof root[field] !== "string" || (root[field] as string).trim() === "") {
+      throw new ConfigError(`Simple configuration requires ${field}`);
+    }
+  }
+
+  const label = "simple configuration";
+  return {
+    name: "default",
+    protocol: "openai",
+    model: (root.model as string).trim(),
+    base_url: requireBaseUrl(root, label),
+    api_key: resolveApiKey(root.token as string, environment, label),
+    thinking: false,
+  };
 }
 
 async function loadMcpConfigFile(

@@ -1,9 +1,25 @@
 {
-  "name": "qicode",
+  "name": "@codepql/qicode",
   "version": "0.1.0",
   "description": "A terminal-first AI coding assistant.",
   "type": "module",
-  "private": true,
+  "private": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Codepql/QiCode.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Codepql/QiCode/issues"
+  },
+  "homepage": "https://github.com/Codepql/QiCode#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "qicode": "./dist/main.js"
   },
@@ -13,12 +29,16 @@
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm run typecheck && pnpm run build"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "packageManager": "pnpm@10.14.0",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
     "chalk": "^6.0.0",

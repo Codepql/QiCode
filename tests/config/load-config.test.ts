@@ -56,6 +56,26 @@ describe("resolveConfigPath", () => {
 });
 
 describe("loadConfig", () => {
+  it("maps the simple base_url/token/model configuration to the default OpenAI provider", async () => {
+    const path = await writeConfig(`
+base_url: https://api.example.com/v1
+token: simple-token
+model: simple-model
+`);
+
+    await expect(loadConfig(path, {})).resolves.toEqual({
+      providers: [{
+        name: "default",
+        protocol: "openai",
+        model: "simple-model",
+        base_url: "https://api.example.com/v1",
+        api_key: "simple-token",
+        thinking: false,
+      }],
+      hooks: [],
+    });
+  });
+
   it("loads valid Anthropic and OpenAI providers", async () => {
     const path = await writeConfig(`
 providers:
