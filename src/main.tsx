@@ -12,7 +12,7 @@ import {
 } from "./config/load-config.js";
 import { parseTeammateFlags, runTeammate } from "./teammate.js";
 import { App } from "./tui/app.js";
-import { initializeProject } from "./cli/init.js";
+import { initializeGlobalConfig, initializeProject } from "./cli/init.js";
 import { VERSION, versionText } from "./version.js";
 export { VERSION, versionText } from "./version.js";
 
@@ -37,10 +37,16 @@ async function main(): Promise<void> {
       return;
     }
     if (args[0] === "init") {
-      const created = await initializeProject(workDir);
+      const projectScope = args[1] === "--project";
+      if (args[1] !== undefined && !projectScope) {
+        throw new Error("Usage: qicode init [--project]");
+      }
+      const created = projectScope
+        ? await initializeProject(workDir)
+        : await initializeGlobalConfig(homedir());
       process.stdout.write(created.length === 0
-        ? "QiCode project files already exist.\n"
-        : `QiCode project initialized:\n${created.map((path) => `  ${path}`).join("\n")}\n`);
+        ? "QiCode configuration already exists.\n"
+        : `QiCode ${projectScope ? "project" : "global"} configuration initialized:\n${created.map((path) => `  ${path}`).join("\n")}\n`);
       return;
     }
     if (teammateArgs !== null) {
@@ -71,7 +77,8 @@ function helpText(): string {
     "",
     "Usage:",
     "  qicode                 Start QiCode in the current project",
-    "  qicode init            Create project configuration templates",
+    "  qicode init            Create one-time global configuration",
+    "  qicode init --project  Create optional project configuration templates",
     "  qicode --config FILE  Start with an explicit configuration file",
     "  qicode --version       Show the installed version",
     "  qicode --help          Show this help",

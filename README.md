@@ -54,7 +54,7 @@ pnpm add --global @coderpql/qicode
 qicode
 ```
 
-首次使用建议先生成项目模板：
+首次使用只需生成一次全局配置：
 
 ```bash
 qicode init
@@ -74,13 +74,15 @@ QiCode 按以下顺序查找 Provider 配置：
 pnpm dev -- --config path/to/config.yaml
 ```
 
-普通用户只需在 `<project>/.QiCode/config.local.yaml` 填写三个字段：
+该命令会创建 `~/.QiCode/config.yaml`。普通用户只需填写三个字段：
 
 ```yaml
 base_url: https://api.example.com/v1
 token: your-api-token
 model: deepseek-v4-flash
 ```
+
+之后在任意项目目录执行 `qicode`，都会使用该全局配置。项目确实需要不同模型或凭据时，执行 `qicode init --project`，再在 `<project>/.QiCode/config.local.yaml` 写入覆盖项。
 
 `protocol` 默认是 `openai`，适用于 OpenAI Chat Completions 及兼容服务。需要 Anthropic 或多个 Provider 时，使用完整格式：
 

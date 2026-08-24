@@ -1,20 +1,34 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const CONFIG_EXAMPLE = `# QiCode project configuration
-# Copy this file to config.local.yaml and fill in your API credentials.
+const CONFIG_TEMPLATE = `# QiCode configuration
+# Fill in your API credentials.
 base_url: https://api.example.com/v1
 token: your-api-token
 model: deepseek-v4-flash
 `;
 
-const MCP_CONFIG_EXAMPLE = `# MCP servers used by this project.
-# Copy this file to config.local.yaml before adding private values.
+const MCP_CONFIG_TEMPLATE = `# MCP server configuration.
 mcp_servers: []
 `;
 
+/** Creates the one-time, user-wide QiCode configuration. */
+export async function initializeGlobalConfig(homeDir: string): Promise<string[]> {
+  const qicodeDir = join(homeDir, ".QiCode");
+  return initializeConfigDirectory(qicodeDir, "config.yaml", "config.yaml");
+}
+
+/** Creates optional templates for configuration specific to one project. */
 export async function initializeProject(workDir: string): Promise<string[]> {
   const qicodeDir = join(workDir, ".QiCode");
+  return initializeConfigDirectory(qicodeDir, "config.example.yaml", "config.example.yaml");
+}
+
+async function initializeConfigDirectory(
+  qicodeDir: string,
+  configFileName: string,
+  mcpConfigFileName: string,
+): Promise<string[]> {
   const mcpDir = join(qicodeDir, "mcp-config");
   const skillsDir = join(qicodeDir, "skills");
   await Promise.all([
@@ -23,8 +37,8 @@ export async function initializeProject(workDir: string): Promise<string[]> {
   ]);
 
   const created: string[] = [];
-  await writeIfMissing(join(qicodeDir, "config.example.yaml"), CONFIG_EXAMPLE, created);
-  await writeIfMissing(join(mcpDir, "config.example.yaml"), MCP_CONFIG_EXAMPLE, created);
+  await writeIfMissing(join(qicodeDir, configFileName), CONFIG_TEMPLATE, created);
+  await writeIfMissing(join(mcpDir, mcpConfigFileName), MCP_CONFIG_TEMPLATE, created);
   return created;
 }
 
