@@ -2,6 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { intArg, strArg, type Tool, type ToolContext, type ToolResult } from "./types.js";
 import { ReadFileDescription } from "./descriptions.js";
+import { canonicalFilePath, contentHash } from "../fs/file-access.js";
 
 export class ReadFileTool implements Tool {
   readonly name = "ReadFile";
@@ -42,6 +43,7 @@ export class ReadFileTool implements Tool {
       }
 
       const content = await readFile(absolutePath, "utf8");
+      ctx.fileVersions?.set(canonicalFilePath(absolutePath), contentHash(content));
       const lines = content.split("\n").slice(offset, offset + limit);
       ctx.readFiles?.add(absolutePath);
       return {

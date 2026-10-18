@@ -9,6 +9,12 @@ export interface ToolContext {
   workDir: string;
   abortSignal?: AbortSignal;
   readFiles?: Set<string>;
+  /** Last contents actually observed by this agent, keyed by canonical path. */
+  fileVersions?: Map<string, string | null>;
+  fileHistory?: {
+    trackEdit(filePath: string, nextHash?: string): void;
+    recordWrite(filePath: string): void;
+  };
   /** 内部受控调用可追加环境变量，BashTool 始终保留当前进程环境。 */
   environment?: NodeJS.ProcessEnv;
   /** 比工具默认上限更严格的输出字节限制。 */

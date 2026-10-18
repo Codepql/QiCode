@@ -1,4 +1,4 @@
-import { appendFileSync, mkdtempSync, utimesSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -56,5 +56,15 @@ describe("session compaction boundary", () => {
     expect(cleanExpiredSessions(workDir, new Date("2026-02-01"))).toBe(1);
     expect(loadSession(workDir, "old")).toEqual([]);
     expect(loadSession(workDir, "fresh")).toHaveLength(1);
+  });
+
+  it("repairs an interrupted tail before appending and preserves damaged bytes", () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-session-"));
+    const message = { role: "user" as const, content: "first", timestamp: "2026-01-01T00:00:00Z" };
+    saveMessage(workDir, "tail", message);
+    appendFileSync(getSessionFilePath(workDir, "tail"), '{"role":"assistant","content":"partial');
+    saveMessage(workDir, "tail", { ...message, content: "after restart" });
+    expect(loadSession(workDir, "tail").map((entry) => entry.content)).toEqual(["first", "after restart"]);
+    expect(readdirSync(join(workDir, ".qicode", "sessions")).some((file) => file.includes(".corrupt-"))).toBe(true);
   });
 });

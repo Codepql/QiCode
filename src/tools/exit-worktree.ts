@@ -1,6 +1,6 @@
 import type { Tool, ToolContext, ToolResult } from "./types.js";
 import { strArg } from "./types.js";
-import { hasWorktreeChanges, removeAgentWorktree } from "../worktree/worktree.js";
+import { removeAgentWorktree } from "../worktree/worktree.js";
 
 export class ExitWorktreeTool implements Tool {
   readonly name = "ExitWorktree";
@@ -18,7 +18,7 @@ export class ExitWorktreeTool implements Tool {
           path: { type: "string", description: "Absolute path returned by EnterWorktree." },
           branch: { type: "string", description: "Branch returned by EnterWorktree." },
           git_root: { type: "string", description: "Repository root containing the managed worktree." },
-          head_commit: { type: "string", description: "Optional commit used as the change baseline." },
+          head_commit: { type: "string", description: "Legacy hint only; cleanup always uses the saved creation baseline." },
         },
         required: ["path", "branch", "git_root"],
       },
@@ -36,18 +36,14 @@ export class ExitWorktreeTool implements Tool {
     if (headCommitValue !== undefined && typeof headCommitValue !== "string") {
       return { output: "Error: head_commit must be a string", isError: true };
     }
-    const headCommit = typeof headCommitValue === "string" ? headCommitValue.trim() : "";
-
-    const changed = headCommit === "" ? false : await hasWorktreeChanges(path, headCommit);
-    if (changed) {
-      return {
-        output: `Worktree has changes, kept at: ${path}\nBranch: ${branch}`,
-        isError: false,
-      };
-    }
-
     try {
       const result = await removeAgentWorktree(path, branch, gitRoot);
+      if (!result.worktreeRemoved) {
+        return {
+          output: `Worktree kept at: ${path}\nBranch: ${branch}\n${result.warnings.join("\n")}`,
+          isError: false,
+        };
+      }
       if (result.warnings.length > 0) {
         return {
           output: `Worktree cleanup completed with warnings: ${path}\n${result.warnings.map((warning) => `- ${warning}`).join("\n")}`,

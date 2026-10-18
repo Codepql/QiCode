@@ -182,6 +182,56 @@ describe("permissions: pure decision layers", () => {
     if (linked) expect(sandbox.check(join("outside-link", "file.txt"))?.effect).toBe("deny");
   });
 
+  it("does not auto-allow multiline, expansion or write-capable command variants", () => {
+    for (const command of ["ls\ntouch hidden", "echo ok\r\nnode payload.js", "cat <(node payload.js)",
+      "echo %PAYLOAD%", "echo !PAYLOAD!", "echo $PAYLOAD", "git log --output=result.txt", "date -s tomorrow", "file -C", "hostname changed-host"]) {
+      expect(isSafeCommand(command), command).toBe(false);
+    }
+    expect(isSafeCommand("hostname")).toBe(true);
+  });
+
+  it("gives an explicit deny priority over automatic, session and plan allowances", () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-deny-"));
+    mkdirSync(join(workDir, ".qicode"), { recursive: true });
+    const plan = join(workDir, ".QiCode", "plan.md");
+    writeFileSync(join(workDir, ".qicode", "permissions.yaml"), [
+      "- rule: Bash(git status)", "  effect: deny",
+      `- rule: WriteFile(${plan.replaceAll("\\", "/")})`, "  effect: deny",
+      `- rule: WriteFile(${plan})`, "  effect: deny",
+    ].join("\n"));
+    const checker = new PermissionChecker(workDir, "bypassPermissions");
+    checker.allowForSession("Bash", { command: "git status" });
+    expect(checker.check("Bash", "command", { command: "git status" }).effect).toBe("deny");
+    expect(new PermissionChecker(workDir, "plan").check("WriteFile", "write", { file_path: plan }).effect).toBe("deny");
+  });
+
+  it("does not broaden a permanent approval into a command prefix", () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-exact-"));
+    const checker = new PermissionChecker(workDir);
+    const command = "npm run build";
+    checker.allowAlways("Bash", { command });
+    expect(checker.check("Bash", "command", { command }).effect).toBe("allow");
+    expect(checker.check("Bash", "command", { command: `${command} && node payload.js` }).effect).toBe("ask");
+  });
+
+  it("retains exact multiline approvals after reloading the rule file", () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-multiline-"));
+    const command = "npm run build\nnpm test";
+    new PermissionChecker(workDir).allowAlways("Bash", { command });
+    const checker = new PermissionChecker(workDir);
+    expect(checker.check("Bash", "command", { command }).effect).toBe("allow");
+    expect(checker.check("Bash", "command", { command: `${command}\nnode payload.js` }).effect).toBe("ask");
+  });
+
+  it("does not let a lower-priority allow hide a deny", () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-deny-"));
+    const homeDir = mkdtempSync(join(tmpdir(), "qicode-home-"));
+    for (const root of [workDir, homeDir]) mkdirSync(join(root, ".qicode"), { recursive: true });
+    writeFileSync(join(homeDir, ".qicode", "permissions.yaml"), "- rule: Bash(git *)\n  effect: allow");
+    writeFileSync(join(workDir, ".qicode", "permissions.yaml"), "- rule: Bash(git push)\n  effect: deny");
+    expect(new RuleEngine(workDir, homeDir).evaluate("Bash", "git push")).toBe("deny");
+  });
+
   it("uses the mode matrix only as an allow/ask fallback", () => {
     expect(modeDecide("default", "read")).toBe("allow");
     expect(modeDecide("default", "write")).toBe("ask");

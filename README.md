@@ -192,6 +192,8 @@ src/
 
 ## Development
 
+第一轮生产化加固的行为变化、恢复方式与限制见 [生产化加固说明](docs/production/round-1.md)。
+
 ```bash
 pnpm typecheck    # TypeScript 类型检查
 pnpm test         # 运行测试

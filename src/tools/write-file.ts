@@ -1,7 +1,9 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { WriteFileDescription } from "./descriptions.js";
 import { strArg, type Tool, type ToolContext, type ToolResult } from "./types.js";
+import { atomicWriteFile } from "../fs/atomic-write.js";
+import { assertFileVersion, canonicalFilePath, contentHash, fileHash, withFileLock } from "../fs/file-access.js";
 
 export class WriteFileTool implements Tool {
   readonly name = "WriteFile";
@@ -34,12 +36,25 @@ export class WriteFileTool implements Tool {
 
     const absolutePath = resolve(ctx.workDir, filePath);
     try {
-      await mkdir(dirname(absolutePath), { recursive: true });
-      await writeFile(absolutePath, content, "utf8");
+      const target = canonicalFilePath(absolutePath);
+      return await withFileLock(target, async () => {
+      const expected = fileHash(target);
+      if (ctx.fileVersions !== undefined && expected !== null && !ctx.fileVersions.has(target)) {
+        return { output: "错误：覆盖前必须先使用 ReadFile 读取文件", isError: true };
+      }
+      if (ctx.fileVersions?.has(target)) assertFileVersion(target, ctx.fileVersions.get(target)!);
+      await mkdir(dirname(target), { recursive: true });
+      if (ctx.abortSignal?.aborted) throw new Error("File operation cancelled");
+      assertFileVersion(target, expected);
+      ctx.fileHistory?.trackEdit(target, contentHash(content));
+      atomicWriteFile(target, content, () => assertFileVersion(target, expected));
+      ctx.fileVersions?.set(target, contentHash(content));
+      ctx.fileHistory?.recordWrite(target);
       return {
         output: `文件已写入：${filePath}（${content.split("\n").length} 行）`,
         isError: false,
       };
+      }, ctx.abortSignal);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { output: `写入文件失败：${message}`, isError: true };

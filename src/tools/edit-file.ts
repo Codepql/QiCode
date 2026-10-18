@@ -1,7 +1,9 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { EditFileDescription } from "./descriptions.js";
 import { boolArg, strArg, type Tool, type ToolContext, type ToolResult } from "./types.js";
+import { atomicWriteFile } from "../fs/atomic-write.js";
+import { assertFileVersion, canonicalFilePath, contentHash, withFileLock } from "../fs/file-access.js";
 
 export class EditFileTool implements Tool {
   readonly name = "EditFile";
@@ -49,7 +51,16 @@ export class EditFileTool implements Tool {
       };
     }
     try {
-      const content = await readFile(absolutePath, "utf8");
+      const target = canonicalFilePath(absolutePath);
+      return await withFileLock(target, async () => {
+      if (ctx.fileVersions !== undefined) {
+        if (!ctx.fileVersions.has(target)) {
+          return { output: "错误：编辑前必须先使用 ReadFile 读取文件", isError: true };
+        }
+        assertFileVersion(target, ctx.fileVersions.get(target)!);
+      }
+      const content = await readFile(target, "utf8");
+      const expected = contentHash(content);
       const count = content.split(oldString).length - 1;
       if (count === 0) {
         return { output: "错误：文件中未找到 old_string", isError: true };
@@ -66,13 +77,19 @@ export class EditFileTool implements Tool {
       const updated = replaceAll
         ? content.replaceAll(oldString, newString)
         : content.replace(oldString, newString);
-      await writeFile(absolutePath, updated, "utf8");
+      if (ctx.abortSignal?.aborted) throw new Error("File operation cancelled");
+      assertFileVersion(target, expected);
+      ctx.fileHistory?.trackEdit(target, contentHash(updated));
+      atomicWriteFile(target, updated, () => assertFileVersion(target, expected));
+      ctx.fileVersions?.set(target, contentHash(updated));
+      ctx.fileHistory?.recordWrite(target);
       return {
         output: replaceAll && count > 1
           ? `文件已编辑：${filePath}（替换 ${count} 处）`
           : `文件已编辑：${filePath}`,
         isError: false,
       };
+      }, ctx.abortSignal);
     } catch (error) {
       const code = error instanceof Error && "code" in error ? error.code : undefined;
       if (code === "ENOENT") return { output: `错误：文件不存在：${filePath}`, isError: true };
