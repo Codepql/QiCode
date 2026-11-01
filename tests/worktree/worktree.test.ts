@@ -58,8 +58,53 @@ describe("Worktree lifecycle", () => {
     await expect(hasWorktreeChanges(result.path, result.headCommit)).resolves.toBe(true);
 
     const removal = await removeAgentWorktree(result.path, result.branch, repository);
-    expect(removal.worktreeRemoved).toBe(true);
-    expect(removal.branchRemoved).toBe(true);
+    expect(removal.worktreeRemoved).toBe(false);
+    expect(removal.branchRemoved).toBe(false);
+    expect(await readFile(join(result.path, "README.md"), "utf8")).toBe("changed");
+  });
+
+  it("keeps untracked and ignored files even when no baseline hint is supplied", async () => {
+    const created = await createAgentWorktree("untracked", repository);
+    await writeFile(join(created.path, "notes.txt"), "valuable", "utf8");
+    const tool = new ExitWorktreeTool();
+    const args = { path: created.path, branch: created.branch, git_root: repository };
+    expect((await tool.execute(args, { workDir: repository })).output).toContain("kept");
+    await rm(join(created.path, "notes.txt"));
+    await writeFile(join(created.path, ".QiCode", "secret.txt"), "private", "utf8");
+    expect((await tool.execute(args, { workDir: repository })).output).toContain("kept");
+    expect(await readFile(join(created.path, ".QiCode", "secret.txt"), "utf8")).toBe("private");
+  });
+
+  it("keeps committed work and preserves the original baseline when reopening", async () => {
+    const first = await createAgentWorktree("committed", repository);
+    await writeFile(join(first.path, "README.md"), "agent commit", "utf8");
+    await git(first.path, ["add", "README.md"]);
+    await git(first.path, ["commit", "-m", "agent work"]);
+    const head = await git(first.path, ["rev-parse", "HEAD"]);
+    const restored = await createAgentWorktree("committed", repository);
+    expect(restored.headCommit).toBe(first.headCommit);
+    const result = await new ExitWorktreeTool().execute({
+      path: first.path, branch: first.branch, git_root: repository, head_commit: head,
+    }, { workDir: repository });
+    expect(result.output).toContain("kept");
+    expect(await git(repository, ["rev-parse", first.branch])).toBe(head);
+  });
+
+  it("does not reset a pre-existing branch", async () => {
+    await git(repository, ["branch", "worktree-existing"]);
+    const head = await git(repository, ["rev-parse", "worktree-existing"]);
+    await writeFile(join(repository, "README.md"), "parent advances", "utf8");
+    await git(repository, ["commit", "-am", "parent update"]);
+    await expect(createAgentWorktree("existing", repository)).rejects.toThrow();
+    expect(await git(repository, ["rev-parse", "worktree-existing"])).toBe(head);
+  });
+
+  it("keeps a legacy worktree without a saved baseline", async () => {
+    const first = await createAgentWorktree("legacy", repository);
+    await rm(join(repository, ".QiCode", "worktree-state", "legacy.json"));
+    const restored = await createAgentWorktree("legacy", repository);
+    expect(restored.warnings.join(" ")).toContain("baseline");
+    expect((await removeAgentWorktree(first.path, first.branch, repository)).worktreeRemoved).toBe(false);
   });
 
   it("exposes safe Enter and Exit tool behavior", async () => {

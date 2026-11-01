@@ -518,6 +518,8 @@ export function App({
       controller.abort();
     }, requestTimeoutMs);
     try {
+      if (fileHistoryRef.current === null) throw new Error("File history is unavailable; restore the history index or start a new session before editing.");
+      fileHistoryRef.current.beginTurn(checkpointMessageIndex, `/skill ${name}`);
       const runtimePromise = runtimeRef.current
         ?? startRuntime(runtimeFactory, config, workDir, buildSkillSection(skillRuntimeRef.current!.catalog));
       runtimeRef.current = runtimePromise;
@@ -757,6 +759,14 @@ export function App({
     if (!bypassSlash && await handleSlashCommand(rawText, config)) return;
 
     const checkpointMessageIndex = conversationRef.current.getMessages().length;
+    try {
+      if (fileHistoryRef.current === null) throw new Error("History index is unavailable. Start a new session or repair the index before editing.");
+      fileHistoryRef.current.beginTurn(checkpointMessageIndex, rawText);
+    } catch (error) {
+      setErrorMessage(`File history: ${error instanceof Error ? error.message : "Unable to prepare a checkpoint."}`);
+      setStatus("failed");
+      return;
+    }
     conversationRef.current.addUserMessage(rawText);
     persistSessionMessage("user", rawText);
     setMessages(conversationRef.current.getMessages());
@@ -787,6 +797,7 @@ export function App({
       }
       const registry = registryRef.current!;
       const subAgentRunner = new SubAgentRunner({
+        fileHistory: fileHistoryRef.current,
         providerConfig: runtime.provider.config,
         registry,
         systemPrompt: runtime.systemPrompt,
@@ -1049,10 +1060,14 @@ export function App({
       return;
     }
     const snapshot = snapshots[snapshotIndex]!;
-    const changed = history.rewind(snapshotIndex);
-    conversationRef.current.truncateTo(snapshot.messageIndex);
-    setMessages(conversationRef.current.getMessages());
-    setCompactNotice(`Rewound to checkpoint ${snapshotIndex}. Restored ${changed.length} file(s).`);
+    try {
+      const changed = history.rewind(snapshotIndex);
+      conversationRef.current.truncateTo(snapshot.messageIndex);
+      setMessages(conversationRef.current.getMessages());
+      setCompactNotice(`Rewound to checkpoint ${snapshotIndex}. Restored ${changed.length} file(s).`);
+    } catch (error) {
+      setCompactNotice(error instanceof Error ? error.message : "Rewind failed; checkpoints were preserved.");
+    }
   }
 
   function resumeSession(sessionId: string | undefined): void {
@@ -1100,17 +1115,19 @@ export function App({
       conversationRef.current = conversation;
       recoveryStateRef.current = new RecoveryState();
       sessionIdRef.current = targetSessionId;
+      let historyWarning = "";
       try {
         fileHistoryRef.current = new FileHistory(workDir, targetSessionId);
       } catch {
         fileHistoryRef.current = null;
+        historyWarning = " File history could not be loaded; repair the index or start a new session before editing.";
       }
       setMessages(conversation.getMessages());
       setForkUiMessages([]);
       setStreamingText("");
       setActiveTools([]);
       setErrorMessage("");
-      setCompactNotice(`Resumed session ${targetSessionId} (${restored.length} messages).`);
+      setCompactNotice(`Resumed session ${targetSessionId} (${restored.length} messages).${historyWarning}`);
     } catch {
       setCompactNotice(`Session "${sessionId}" could not be restored.`);
     }

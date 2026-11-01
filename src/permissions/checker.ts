@@ -5,7 +5,7 @@ import {
   realpathSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import {
   basename,
   dirname,
@@ -141,23 +141,17 @@ const SAFE_PREFIXES: string[] = [
   "head",
   "tail",
   "wc",
-  "date",
   "whoami",
   "uname",
-  "hostname",
   "which",
   "type",
-  "file",
   "git status",
-  "git log",
-  "git diff",
-  "git show",
   "git rev-parse",
 ];
 
 // 元字符筛查：命中任一即不允许走快速放行通道。
 // & 覆盖 &&、| 覆盖 ||，比文档列举的 6 类更严、方向一致。
-const UNSAFE_METACHARACTERS = [">", "|", ";", "&", "$(", "`"];
+const UNSAFE_METACHARACTERS = [">", "<", "|", ";", "&", "$", "`", "%", "!", "^", "(", ")"];
 
 /**
  * 安全只读命令快速通道：先做元字符筛查（防「cat … > /etc/shadow」这类白名单陷阱），
@@ -166,9 +160,11 @@ const UNSAFE_METACHARACTERS = [">", "|", ";", "&", "$(", "`"];
 export function isSafeCommand(command: string): boolean {
   const trimmed = command.trim();
   if (trimmed === "") return false;
+  if (/[\x00-\x08\x0a-\x1f\x7f]/.test(trimmed)) return false;
   if (UNSAFE_METACHARACTERS.some((token) => trimmed.includes(token))) {
     return false;
   }
+  if (trimmed === "hostname") return true;
   return SAFE_PREFIXES.some(
     (prefix) =>
       trimmed === prefix ||
@@ -210,7 +206,7 @@ function realPathOf(target: string): string {
 }
 
 /**
- * 路径沙箱：只允许项目根与其子树、约定临时目录子树内的路径。
+ * 路径沙箱：只允许项目根与其子树内的路径。
  * 用「逻辑路径 -> 绝对路径 -> 真实路径」三层校验，阻止 ../ 穿越、前缀碰撞和符号链接逃逸。
  * check() 返回 null 表示放行，返回 Decision 表示拒绝；空路径不伪造结论。
  */
@@ -222,7 +218,6 @@ export class PathSandbox {
     this.#projectDir = projectDir;
     this.#roots = [];
     this.addRoot(projectDir);
-    this.addRoot(tmpdir());
   }
 
   /** 追加一个允许根目录（会先解析成真实路径）。 */
@@ -255,9 +250,10 @@ interface Rule {
   tool: string;
   pattern: string;
   effect: RuleEffect;
+  exact?: boolean;
 }
 
-const RULE_RE = /^([\w*]+)\((.+)\)$/; // 工具段允许通配 *
+const RULE_RE = /^([\w*]+)\(([\s\S]+)\)$/; // 工具段允许通配 *，exact 规则允许多行字面内容。
 
 /**
  * 受限 glob：* 不跨路径分隔符（[^/]*），? 匹配单个非分隔符字符（[^/]），整体首尾锚定。
@@ -302,14 +298,14 @@ function loadRulesFile(path: string): Rule[] {
     if (typeof ruleText !== "string") continue;
     const match = RULE_RE.exec(ruleText);
     if (match === null) continue;
-    rules.push({ tool: match[1]!, pattern: match[2]!, effect });
+    rules.push({ tool: match[1]!, pattern: match[2]!, effect, ...(record["exact"] === true ? { exact: true } : {}) });
   }
   return rules;
 }
 
 /**
- * 三级规则引擎：用户级 -> 项目级 -> 本地级，先命中即返回。
- * 每级文件内按书写顺序「末条优先」（倒序遍历取第一个命中）。
+ * 显式 deny 在所有级别优先；allow 按用户级 -> 项目级 -> 本地级匹配。
+ * 每级文件内按书写顺序「末条优先」，永久审批使用 exact 字面匹配。
  * 每次评估现读现匹配，因此「永久允许」写盘后立即生效、无需重启。
  */
 export class RuleEngine {
@@ -324,19 +320,12 @@ export class RuleEngine {
   }
 
   evaluate(toolName: string, content: string): RuleEffect | null {
-    for (const path of [this.#userPath, this.#projectPath, this.#localPath]) {
-      const rules = loadRulesFile(path);
-      for (let index = rules.length - 1; index >= 0; index -= 1) {
-        const rule = rules[index]!;
-        if (
-          (rule.tool === toolName || rule.tool === "*") &&
-          globMatch(rule.pattern, content)
-        ) {
-          return rule.effect;
-        }
-      }
-    }
-    return null;
+    const matching = [this.#userPath, this.#projectPath, this.#localPath]
+      .flatMap((path) => loadRulesFile(path).reverse())
+      .filter((rule) => (rule.tool === toolName || rule.tool === "*")
+        && (rule.exact ? rule.pattern === content : globMatch(rule.pattern, content)));
+    if (matching.some((rule) => rule.effect === "deny")) return "deny";
+    return matching[0]?.effect ?? null;
   }
 
   /** 把规则追加写入本地级配置文件（.qicode/permissions.local.yaml），不自动泛化。 */
@@ -347,6 +336,7 @@ export class RuleEngine {
     const entries = rules.map((entry) => ({
       rule: `${entry.tool}(${entry.pattern})`,
       effect: entry.effect,
+      ...(entry.exact ? { exact: true } : {}),
     }));
     writeFileSync(this.#localPath, dump(entries), "utf8");
   }
@@ -371,16 +361,15 @@ export class PermissionChecker {
     this.#sessionAllowed.add(`${toolName}:${extractContent(toolName, args)}`);
   }
 
-  /** 永久放行：把「工具(具体内容前60字*)」精确规则写入本地级 YAML，跨重启生效、不自动泛化。 */
+  /** 永久放行只保存完整字面内容，不截断、不自动追加通配符。 */
   allowAlways(toolName: string, args: Record<string, unknown>): void {
     const content = extractContent(toolName, args);
-    const pattern =
-      content.length > 60 ? `${content.slice(0, 60)}*` : `${content}*`;
-    this.#ruleEngine.appendLocalRule({ tool: toolName, pattern, effect: "allow" });
+    if (content === "") return;
+    this.#ruleEngine.appendLocalRule({ tool: toolName, pattern: content, effect: "allow", exact: true });
   }
 
   /**
-   * 唯一权限入口：按 Layer 0/2/3/4/4b/5/6 顺序短路返回 Allow/Deny/Ask。
+   * 唯一权限入口：危险命令、路径和显式拒绝先于任何允许分支。
    * 调用方（Agent）应在 executor.submit 之前调用；未注册工具按 command 类处理，不会默认 Allow。
    */
   check(
@@ -389,20 +378,6 @@ export class PermissionChecker {
     args: Record<string, unknown>,
   ): Decision {
     const content = extractContent(toolName, args);
-
-    // Layer 0: plan 模式下对计划文件的写入豁免（复用 getPlanPath，对齐第四章语义）。
-    if (
-      this.mode === "plan" &&
-      (toolName === "WriteFile" || toolName === "EditFile") &&
-      this.#isPlanFilePath(String(args.file_path ?? ""))
-    ) {
-      return { effect: "allow", reason: "Plan file write allowed in plan mode" };
-    }
-
-    // Layer 2: 安全只读命令快速放行（先元字符筛查，防白名单陷阱）。
-    if (category === "command" && isSafeCommand(content)) {
-      return { effect: "allow", reason: "Safe read-only command" };
-    }
 
     // Layer 3: 危险命令黑名单（任何模式、任何规则都拦得住）。
     if (category === "command") {
@@ -422,13 +397,24 @@ export class PermissionChecker {
       if (sandboxDecision !== null) return sandboxDecision;
     }
 
+    // Every explicit deny wins over automatic, session, permanent and plan allowances.
+    const ruleEffect = this.#ruleEngine.evaluate(toolName, content);
+    if (ruleEffect === "deny") return { effect: "deny", reason: "Permission rule: deny" };
+
+    if (this.mode === "plan" && (toolName === "WriteFile" || toolName === "EditFile")
+      && this.#isPlanFilePath(String(args.file_path ?? ""))) {
+      return { effect: "allow", reason: "Plan file write allowed in plan mode" };
+    }
+    if (category === "command" && isSafeCommand(content)) {
+      return { effect: "allow", reason: "Safe read-only command" };
+    }
+
     // Layer 4b: 会话级临时放行（进程内白名单）。
     if (this.#sessionAllowed.has(`${toolName}:${content}`)) {
       return { effect: "allow", reason: "Session allow: previously approved" };
     }
 
     // Layer 5: 三级规则引擎（用户级 -> 项目级 -> 本地级，文件内末条优先）。
-    const ruleEffect = this.#ruleEngine.evaluate(toolName, content);
     if (ruleEffect !== null) {
       return { effect: ruleEffect, reason: `Permission rule: ${ruleEffect}` };
     }

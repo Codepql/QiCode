@@ -73,6 +73,7 @@ export interface AgentConfig {
 
 export class Agent {
   readonly #readFiles = new Set<string>();
+  readonly #fileVersions = new Map<string, string | null>();
   readonly #checker: PermissionChecker;
   readonly #onPermissionRequest: AgentConfig["onPermissionRequest"];
   readonly #compactTracking = new AutoCompactTrackingState();
@@ -376,6 +377,8 @@ export class Agent {
     const executor = new StreamingExecutor(this.config.registry, {
       workDir: this.config.workDir,
       readFiles: this.#readFiles,
+      fileVersions: this.#fileVersions,
+      ...(this.config.fileHistory === undefined ? {} : { fileHistory: this.config.fileHistory }),
       ...(this.config.abortSignal === undefined ? {} : { abortSignal: this.config.abortSignal }),
     });
     const executions = new Map<string, ToolExecution>();
@@ -459,11 +462,6 @@ export class Agent {
           checker.allowAlways(toolUse.name, toolUse.input);
         }
         // allow / allowAlways 都落到正常执行路径
-      }
-
-      if ((toolUse.name === "WriteFile" || toolUse.name === "EditFile")
-        && typeof toolUse.input.file_path === "string") {
-        this.config.fileHistory?.trackEdit(toolUse.input.file_path);
       }
 
       executor.submit(toolUse.id, toolUse.name, toolUse.input);

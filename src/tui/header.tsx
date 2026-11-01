@@ -1,4 +1,4 @@
-import { Box, Static, Text } from "ink";
+import { Box, Text } from "ink";
 
 const CAT = [" /\\_/\\", "( o.o )", " > ^ <"] as const;
 
@@ -18,24 +18,18 @@ export function Header({
   rows = process.stdout.rows ?? 24,
 }: HeaderProps) {
   const showCat = columns >= 32 && rows >= 8;
-  const header = { version, model, workDir, showCat };
-
   return (
-    <Static items={[header]}>
-      {(item) => (
-        <Box key="qicode-header" flexDirection={item.showCat ? "row" : "column"} marginBottom={1}>
-          {item.showCat && (
-            <Box flexDirection="column" marginRight={4}>
-              {CAT.map((line) => <Text key={line} color="magenta">{line}</Text>)}
-            </Box>
-          )}
-          <Box flexDirection="column">
-            <Text bold color="magenta">QiCode v{item.version}</Text>
-            <Text>{item.model}</Text>
-            <Text dimColor wrap="truncate-end">{item.workDir}</Text>
-          </Box>
+    <Box flexDirection={showCat ? "row" : "column"} marginBottom={1}>
+      {showCat && (
+        <Box flexDirection="column" marginRight={4}>
+          {CAT.map((line) => <Text key={line} color="magenta">{line}</Text>)}
         </Box>
       )}
-    </Static>
+      <Box flexDirection="column">
+        <Text bold color="magenta">QiCode v{version}</Text>
+        <Text>{model}</Text>
+        <Text dimColor wrap="truncate-end">{workDir}</Text>
+      </Box>
+    </Box>
   );
 }

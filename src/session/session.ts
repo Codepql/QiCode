@@ -1,16 +1,24 @@
 import {
   appendFileSync,
+  closeSync,
   type Dirent,
   existsSync,
+  fsyncSync,
+  fstatSync,
   mkdirSync,
+  openSync,
+  readSync,
   readFileSync,
   readdirSync,
   statSync,
   unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { ConversationBlock } from "../conversation/types.js";
+import { withFileLocksSync } from "../fs/file-access.js";
+import { atomicWriteFile } from "../fs/atomic-write.js";
 
 export const COMPACT_BOUNDARY = "compact_boundary";
 export const SESSION_EXPIRY_DAYS = 30;
@@ -68,7 +76,30 @@ export function saveMessage(
 ): void {
   const path = getSessionFilePath(workDir, sessionId);
   mkdirSync(sessionsDir(workDir), { recursive: true });
-  appendFileSync(path, `${JSON.stringify(message)}\n`, "utf8");
+  withFileLocksSync([path], () => {
+    let descriptor: number | undefined = openSync(path, "a+", 0o600);
+    try {
+      const size = fstatSync(descriptor).size;
+      const last = Buffer.alloc(1);
+      if (size > 0) readSync(descriptor, last, 0, 1, size - 1);
+      if (size > 0 && last[0] !== 10) {
+        const content = readFileSync(path);
+        const boundary = content.lastIndexOf(10) + 1;
+        const tail = content.subarray(boundary);
+        if (parseSessionMessage(tail.toString("utf8")).length > 0) appendFileSync(descriptor, "\n", "utf8");
+        else {
+          // Preserve the damaged tail before repairing an interrupted JSONL append.
+          writeFileSync(`${path}.corrupt-${randomBytes(8).toString("hex")}`, tail, { flag: "wx", mode: 0o600 });
+          closeSync(descriptor);
+          descriptor = undefined;
+          atomicWriteFile(path, content.subarray(0, boundary));
+          descriptor = openSync(path, "a", 0o600);
+        }
+      }
+      appendFileSync(descriptor, `${JSON.stringify(message)}\n`, "utf8");
+      fsyncSync(descriptor);
+    } finally { if (descriptor !== undefined) closeSync(descriptor); }
+  });
 }
 
 export function saveCompactBoundary(

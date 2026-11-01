@@ -5,6 +5,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
   statSync,
   symlinkSync,
@@ -12,6 +13,8 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { readGitState } from "./git-state.js";
+import { atomicWriteFile } from "../fs/atomic-write.js";
+import { canonicalFilePath, contentHash, withFileLock } from "../fs/file-access.js";
 
 const execFileAsync = promisify(execFile);
 const WORKTREE_DIRECTORY = ".QiCode";
@@ -36,6 +39,15 @@ export interface WorktreeRemovalResult {
   warnings: string[];
 }
 
+interface WorktreeRecord {
+  version: 1;
+  path: string;
+  branch: string;
+  headCommit: string;
+  gitRoot: string;
+  ignoredFiles: Record<string, string>;
+}
+
 /**
  * Create an isolated worktree or restore an existing managed worktree.
  * The existing-directory path reads Git metadata first and does not run
@@ -52,6 +64,10 @@ export async function createAgentWorktree(
   const root = await resolveGitRoot(gitRoot);
   const branch = `${WORKTREE_BRANCH_PREFIX}${slug}`;
   const path = managedWorktreePath(root, slug);
+  const recordPath = worktreeRecordPath(root, slug);
+  mkdirSync(dirname(recordPath), { recursive: true });
+
+  return withFileLock(recordPath, async () => {
 
   if (existsSync(path)) {
     const state = readGitState(path);
@@ -61,16 +77,29 @@ export async function createAgentWorktree(
     if (state.branch !== branch) {
       throw new Error(`existing worktree uses unexpected branch: ${state.branch || "detached HEAD"}`);
     }
-    return { path, branch, headCommit: state.headSha, gitRoot: root, warnings: [] };
+    if (!sameRepository(state.commonGitDir, readGitState(root)?.commonGitDir)) {
+      throw new Error("existing directory belongs to another repository");
+    }
+    const record = readWorktreeRecord(root, slug);
+    return {
+      path, branch, headCommit: record?.headCommit ?? state.headSha, gitRoot: root,
+      warnings: record === undefined ? ["No saved creation baseline; automatic cleanup is disabled."] : [],
+    };
   }
 
   mkdirSync(join(root, WORKTREE_DIRECTORY, "worktrees"), { recursive: true });
-  await runGit(root, ["worktree", "add", "-B", branch, path]);
-  const warnings = await performPostCreationSetup(root, path);
+  // -b fails if the branch exists; it must never reset another task's commits.
+  await runGit(root, ["worktree", "add", "-b", branch, path]);
   const state = readGitState(path);
   const headCommit = state?.headSha ?? await runGit(path, ["rev-parse", "HEAD"]);
   if (headCommit === "") throw new Error("created worktree has no HEAD commit");
+  const record: WorktreeRecord = { version: 1, path, branch, headCommit, gitRoot: root, ignoredFiles: {} };
+  atomicWriteFile(recordPath, JSON.stringify(record));
+  const warnings = await performPostCreationSetup(root, path);
+  record.ignoredFiles = await ignoredFileSnapshot(path);
+  atomicWriteFile(recordPath, JSON.stringify(record));
   return { path, branch, headCommit, gitRoot: root, warnings };
+  });
 }
 
 /**
@@ -82,7 +111,8 @@ export async function hasWorktreeChanges(
   baseCommit: string,
 ): Promise<boolean> {
   try {
-    const status = await runGit(worktreePath, ["status", "--porcelain"]);
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(baseCommit)) return true;
+    const status = await runGit(worktreePath, ["status", "--porcelain", "--untracked-files=all"]);
     if (status !== "") return true;
 
     const currentHead = readGitState(worktreePath)?.headSha
@@ -110,22 +140,79 @@ export async function removeAgentWorktree(
     throw new Error("branch does not match the managed worktree path");
   }
 
+  return withFileLock(worktreeRecordPath(root, slug), async () => {
+  const record = readWorktreeRecord(root, slug);
+  const state = readGitState(worktreePath);
+  if (record === undefined || state?.branch !== branch
+    || !sameRepository(state.commonGitDir, readGitState(root)?.commonGitDir)
+    || await hasWorktreeChanges(worktreePath, record.headCommit)
+    || !await ignoredFilesUnchanged(worktreePath, record.ignoredFiles)) {
+    return {
+      worktreeRemoved: false, branchRemoved: false,
+      warnings: ["Worktree kept: changes, new commits, an unknown baseline, or unverifiable repository state."],
+    };
+  }
+
   const warnings: string[] = [];
   let worktreeRemoved = false;
   let branchRemoved = false;
   try {
-    await runGit(root, ["worktree", "remove", "--force", worktreePath]);
+    await runGit(root, ["worktree", "remove", worktreePath]);
     worktreeRemoved = true;
   } catch (error) {
     warnings.push(`could not remove worktree: ${errorMessage(error)}`);
   }
-  try {
-    await runGit(root, ["branch", "-D", branch]);
+  if (worktreeRemoved) try {
+    await runGit(root, ["branch", "-d", branch]);
     branchRemoved = true;
   } catch (error) {
     warnings.push(`could not delete branch: ${errorMessage(error)}`);
   }
   return { worktreeRemoved, branchRemoved, warnings };
+  });
+}
+
+function worktreeRecordPath(root: string, slug: string): string {
+  return join(root, WORKTREE_DIRECTORY, "worktree-state", `${slug}.json`);
+}
+
+function sameRepository(left: string, right: string | undefined): boolean {
+  if (right === undefined) return false;
+  const first = canonicalFilePath(left);
+  const second = canonicalFilePath(right);
+  return process.platform === "win32" ? first.toLowerCase() === second.toLowerCase() : first === second;
+}
+
+function readWorktreeRecord(root: string, slug: string): WorktreeRecord | undefined {
+  try {
+    const value = JSON.parse(readFileSync(worktreeRecordPath(root, slug), "utf8")) as Partial<WorktreeRecord>;
+    if (value.version !== 1 || value.path !== managedWorktreePath(root, slug)
+      || value.gitRoot !== root || value.branch !== `${WORKTREE_BRANCH_PREFIX}${slug}`
+      || typeof value.ignoredFiles !== "object" || value.ignoredFiles === null
+      || typeof value.headCommit !== "string" || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(value.headCommit)) return undefined;
+    return value as WorktreeRecord;
+  } catch { return undefined; }
+}
+
+async function ignoredFileSnapshot(path: string): Promise<Record<string, string>> {
+  const files = (await runGit(path, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z",
+    "--", ".", ":(exclude)node_modules", ":(exclude)node_modules/**"])).split("\0").filter(Boolean);
+  const hashes: Record<string, string> = {};
+  for (const file of files.sort()) {
+    const target = join(path, file);
+    hashes[file] = lstatSync(target).isSymbolicLink()
+      ? `link:${readlinkSync(target)}` : contentHash(readFileSync(target));
+  }
+  const modules = join(path, "node_modules");
+  if (existsSync(modules) && !lstatSync(modules).isSymbolicLink()) {
+    throw new Error("Automatic worktree cleanup is disabled for a private node_modules directory");
+  }
+  return hashes;
+}
+
+async function ignoredFilesUnchanged(path: string, baseline: Record<string, string>): Promise<boolean> {
+  try { return JSON.stringify(await ignoredFileSnapshot(path)) === JSON.stringify(baseline); }
+  catch { return false; }
 }
 
 export function isValidWorktreeSlug(slug: string): boolean {
@@ -277,7 +364,7 @@ async function runGit(cwd: string, args: readonly string[]): Promise<string> {
       timeout: GIT_TIMEOUT_MS,
       maxBuffer: GIT_MAX_BUFFER,
     });
-    return stdout.trim();
+    return args.includes("-z") ? stdout : stdout.trim();
   } catch (error) {
     throw new Error(errorMessage(error));
   }

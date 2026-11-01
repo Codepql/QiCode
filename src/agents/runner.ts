@@ -1,5 +1,6 @@
 import { Agent, type AgentConfig } from "../agent/agent.js";
 import type { AgentEvent } from "../agent/events.js";
+import type { FileHistory } from "../filehistory/filehistory.js";
 import type { ProviderConfig } from "../config/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import { createProvider, redactSecrets, type Provider } from "../llm/client.js";
@@ -55,6 +56,7 @@ export interface SubAgentRunnerConfig {
   maxOutputChars?: number;
   contextWindow?: number;
   onPermissionRequest?: AgentConfig["onPermissionRequest"];
+  fileHistory?: FileHistory;
 }
 
 /**
@@ -128,6 +130,7 @@ export class SubAgentRunner {
         abortSignal: controller.signal,
         maxIterations: Math.min(request.definition.maxTurns, MAX_SUBAGENT_MAX_TURNS),
         checker: new PermissionChecker(this.config.workDir, request.definition.permissionMode),
+        ...(this.config.fileHistory === undefined ? {} : { fileHistory: this.config.fileHistory }),
         ...(this.config.contextWindow === undefined ? {} : { contextWindow: this.config.contextWindow }),
         ...(this.config.onPermissionRequest === undefined
           ? {}
