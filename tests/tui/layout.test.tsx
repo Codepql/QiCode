@@ -84,7 +84,7 @@ describe("TUI layout", () => {
     expect(view.lastFrame()).not.toMatch(/[╭╮╰╯─]/);
   });
 
-  it("keeps manual scroll position and supports arrow-key scrolling", async () => {
+  it("uses dedicated transcript keys without taking editor navigation keys", async () => {
     const messages: ConversationMessage[] = [];
     for (let index = 0; index < 12; index += 1) {
       messages.push(
@@ -94,13 +94,13 @@ describe("TUI layout", () => {
     }
     const view = render(<ChatView messages={messages} maxHeight={5} />);
 
-    view.stdin.write("\u001b[H");
+    view.stdin.write("\u001b[1;5H");
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(view.lastFrame()).toContain("question-0");
 
-    for (let index = 0; index < 80; index += 1) view.stdin.write("\u001b[B");
+    view.stdin.write("\u001b[1;5F");
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(view.lastFrame()).toContain("question-11");
+    expect(view.lastFrame()).toContain("answer-11");
     view.unmount();
   });
 
@@ -139,7 +139,7 @@ describe("TUI layout", () => {
       />,
     );
 
-    expect(view.lastFrame()).toContain("This command requires approval");
+    expect(view.lastFrame()).toContain("需要授权");
     view.stdin.write("\u001b[B");
     await new Promise((resolve) => setTimeout(resolve, 0));
     view.stdin.write("\r");

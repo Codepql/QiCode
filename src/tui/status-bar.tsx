@@ -14,9 +14,11 @@ export interface StatusBarProps {
   mode: PermissionMode;
   inputTokens?: number;
   outputTokens?: number;
+  busy?: boolean;
+  teamCount?: number;
 }
 
-export function StatusBar({ mode, inputTokens, outputTokens }: StatusBarProps) {
+export function StatusBar({ mode, inputTokens, outputTokens, busy = false, teamCount = 0 }: StatusBarProps) {
   const modeInfo = mode === "default" ? undefined : MODE_DISPLAY[mode];
 
   return (
@@ -24,7 +26,7 @@ export function StatusBar({ mode, inputTokens, outputTokens }: StatusBarProps) {
       {modeInfo === undefined
         ? <>default | </>
         : <><Text color={modeInfo.color}>{modeInfo.name} on </Text>(shift+tab to cycle) | </>}
-      · ↑ {inputTokens ?? "-"} · ↓ {outputTokens ?? "-"} · Ctrl+C exit
+      · ↑ {inputTokens ?? "-"} · ↓ {outputTokens ?? "-"} · {busy ? "Esc 取消" : "Ctrl+C 两次退出"}{teamCount > 0 ? ` · 团队 ${teamCount}` : ""}
     </Text>
   );
 }

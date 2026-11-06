@@ -1,4 +1,4 @@
-import { Box, Text, useApp, useInput, useStdout } from "ink";
+import { Box, Text, useApp, useWindowSize } from "ink";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Agent } from "../agent/agent.js";
 import { forceCompact } from "../compact/compact.js";
@@ -69,10 +69,10 @@ import { InputBox } from "./input-box.js";
 import { PermissionDialog, type PermissionAction } from "./permission-dialog.js";
 import { ProviderSelect } from "./provider-select.js";
 import { StatusBar } from "./status-bar.js";
-import { TeamStatus } from "./team-status.js";
 import { TeamsDialog } from "./teams-dialog.js";
-import { TeammateSpinnerTree } from "./teammate-spinner-tree.js";
-import { formatArgs } from "./tool-display.js";
+import { TerminalInput, useRoutedInput } from "./input-router.js";
+import { TerminalFrame } from "./terminal-frame.js";
+import { NoticePanel } from "./notice-panel.js";
 import {
   buildSkillSection,
   contextWindowFor,
@@ -106,7 +106,11 @@ export interface AppProps {
 const createMcpManager = (): MCPManager => new MCPManager();
 const EMPTY_HOOKS: readonly unknown[] = [];
 
-export function App({
+export function App(props: AppProps) {
+  return <TerminalInput><AppContent {...props} /></TerminalInput>;
+}
+
+function AppContent({
   providers,
   mcpServers = [],
   hooks,
@@ -116,24 +120,29 @@ export function App({
   mcpManagerFactory = createMcpManager,
 }: AppProps) {
   const { exit } = useApp();
-  const { stdout } = useStdout();
+  const { columns, rows } = useWindowSize();
+  const tooSmall = columns < 40 || rows < 10;
   const [selectedConfig, setSelectedConfig] = useState<ProviderConfig | undefined>(
     providers.length === 1 ? providers[0] : undefined,
   );
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [forkUiMessages, setForkUiMessages] = useState<ForkUiMessage[]>([]);
+  const uiMessages = useMemo(() => mergeForkUiMessages(messages, forkUiMessages), [messages, forkUiMessages]);
   const [streamingText, setStreamingText] = useState("");
   const [activeTools, setActiveTools] = useState<ActiveTool[]>([]);
   const [status, setStatus] = useState<TurnStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [exitHint, setExitHint] = useState("");
+  const [noticeExpanded, setNoticeExpanded] = useState(false);
   const [mode, setMode] = useState<PermissionMode>("default");
   const [permissionRequest, setPermissionRequest] = useState<{
+    id: number;
     toolName: string;
     argsSummary: string;
     reason: string;
   } | null>(null);
   const permissionResolveRef = useRef<((action: PermissionAction) => void) | null>(null);
+  const permissionSequenceRef = useRef(0);
   const [inputTokens, setInputTokens] = useState<number>();
   const [outputTokens, setOutputTokens] = useState<number>();
   const [iteration, setIteration] = useState<number>();
@@ -246,15 +255,6 @@ export function App({
     commandUsageTrackerRef.current = new CommandUsageTracker(workDir);
   }
   const busy = status === "waiting" || status === "streaming";
-  const chatChromeRows =
-    8 +
-    (errorMessage !== "" ? 1 : 0) +
-    (compactNotice !== "" ? 1 : 0) +
-    (hookNotice !== "" ? 1 : 0) +
-    (agentNotice !== "" ? 1 : 0) +
-    (exitHint !== "" ? 1 : 0) +
-    (permissionRequest !== null ? 8 : 0);
-  const chatMaxHeight = Math.max(4, (stdout.rows ?? 24) - chatChromeRows);
 
   useEffect(() => {
     injectDurableContext(conversationRef.current, workDir);
@@ -349,60 +349,52 @@ export function App({
     subAgentRunnerRef.current = undefined;
   }, [runtimeFactory, selectedConfig, workDir]);
 
-  // Shift+Tab 循环切换权限模式（原始 \x1b[Z 序列；只在此处监听，避免双重触发切两档）。
-  useEffect(() => {
-    const cycle: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
-    const handler = (data: Buffer): void => {
-      if (data.toString() === "\x1b[Z") {
-        setMode((previous) => {
-          const index = cycle.indexOf(previous);
-          return cycle[(index + 1) % cycle.length]!;
-        });
-      }
-    };
-    process.stdin.on("data", handler);
-    return () => {
-      process.stdin.off("data", handler);
-    };
-  }, []);
-
-  useInput((input, key) => {
+  useRoutedInput(tooSmall ? 1000 : 0, (input, key) => {
+    if (tooSmall && !(key.ctrl && input === "c")) return true;
+    if (key.tab && key.shift) {
+      const cycle: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
+      setMode((previous) => cycle[(cycle.indexOf(previous) + 1) % cycle.length]!);
+      return true;
+    }
     if (key.ctrl && input.toLowerCase() === "t") {
       setTeamsDialogOpen(true);
-      return;
+      return true;
     }
     if (key.escape && busy && permissionRequest === null) {
       abortRef.current?.abort();
-      setExitHint("Cancelling current task...");
-      return;
+      setExitHint("正在取消当前任务…");
+      return true;
     }
 
     if (key.ctrl && input === "c") {
       if (busy) {
         abortRef.current?.abort();
-        setExitHint("Cancelling current task...");
-        return;
+        setExitHint("正在取消当前任务…");
+        return true;
       }
 
       const now = Date.now();
       if (now - lastCtrlCRef.current <= 2_000) {
         exit();
-        return;
+        return true;
       }
 
       lastCtrlCRef.current = now;
-      setExitHint("Press Ctrl+C again within 2s to exit.");
+      setExitHint("两秒内再次按 Ctrl+C 退出。");
       if (exitHintTimerRef.current) clearTimeout(exitHintTimerRef.current);
       exitHintTimerRef.current = setTimeout(() => {
         lastCtrlCRef.current = 0;
         setExitHint("");
       }, 2_000);
+      return true;
     }
+    return false;
   });
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setTeammateStates(teamManagerRef.current?.getAllTeammateStates() ?? []);
+      const next = teamManagerRef.current?.getAllTeammateStates() ?? [];
+      setTeammateStates((previous) => previous.length === 0 && next.length === 0 ? previous : next);
     }, 500);
     return () => clearInterval(timer);
   }, []);
@@ -410,7 +402,7 @@ export function App({
   if (!selectedConfig) {
     return (
       <Box flexDirection="column">
-        <Text bold color="magenta">QiCode</Text>
+        <Header version={VERSION} model="选择模型" workDir={workDir} columns={columns} rows={rows} />
         <ProviderSelect providers={providers} onSelect={setSelectedConfig} />
       </Box>
     );
@@ -613,8 +605,9 @@ export function App({
       controller.signal.addEventListener("abort", onAbort, { once: true });
       permissionResolveRef.current = finish;
       setPermissionRequest({
+        id: ++permissionSequenceRef.current,
         toolName,
-        argsSummary: formatArgs(args),
+        argsSummary: [args.command, args.file_path, args.pattern, args.path].find((value): value is string => typeof value === "string") ?? JSON.stringify(args, null, 2),
         reason: decision.reason,
       });
     });
@@ -1135,59 +1128,70 @@ export function App({
 
   return (
     <Box flexDirection="column">
-      <Header version={VERSION} model={selectedConfig.model} workDir={workDir} />
-      <ChatView messages={mergeForkUiMessages(messages, forkUiMessages)} streamingText={streamingText} activeTools={activeTools} maxHeight={chatMaxHeight} />
-      <TeamStatus count={teammateStates.length} />
-      <TeammateSpinnerTree teammates={teammateStates} leaderVerb={status === "streaming" ? "thinking" : "idle"} {...(inputTokens === undefined ? {} : { leaderTokens: inputTokens })} />
-      <Activity
-        active={busy}
-        label={status === "waiting" ? "Waiting" : iteration === undefined ? "Thinking" : `Iteration ${iteration}`}
-        startedAt={startedAt}
-      />
-      {errorMessage && <Text color="red">Error: {errorMessage}</Text>}
-      {compactNotice && <Text color="cyan">{compactNotice}</Text>}
-      {hookNotice && <Text color="yellow">Hook configuration: {hookNotice}</Text>}
-      {agentNotice && <Text color="yellow">Agent configuration: {agentNotice}</Text>}
-      {mcpNotice && <Text color="yellow">{mcpNotice}</Text>}
-      {exitHint && <Text color="yellow">{exitHint}</Text>}
-      {permissionRequest && (
-        <PermissionDialog
-          toolName={permissionRequest.toolName}
-          argsSummary={permissionRequest.argsSummary}
-          reason={permissionRequest.reason}
-          onComplete={(action) => {
-            permissionResolveRef.current?.(action);
-            permissionResolveRef.current = null;
-            setPermissionRequest(null);
-          }}
-        />
-      )}
-      {teamsDialogOpen && (
-        <TeamsDialog
-          teammates={teammateStates}
-          onClose={() => setTeamsDialogOpen(false)}
-          onKill={(name) => {
-            void teamManagerRef.current?.list().flatMap((team) => team.listMembers()).find((member) => member.name === name)?.cancel?.();
-          }}
-          onShutdown={(name) => {
-            const member = teamManagerRef.current?.list().flatMap((team) => team.listMembers()).find((candidate) => candidate.name === name);
-            if (member !== undefined) void member.mailbox.send("lead", "[shutdown] requested from Teams dialog");
-          }}
-        />
-      )}
-      <Box marginTop={1} flexDirection="column">
-        <InputBox
-          disabled={busy || permissionRequest !== null}
-          commands={commandRegistryRef.current!.listCommands()}
-          usageTracker={commandUsageTrackerRef.current!}
-          onSubmit={(value) => void submit(value)}
-        />
-        <StatusBar
-          mode={mode}
-          {...(inputTokens === undefined ? {} : { inputTokens })}
-          {...(outputTokens === undefined ? {} : { outputTokens })}
-        />
-        <Text dimColor>Ctrl+T teams</Text>
+      {tooSmall && <Box flexDirection="column" width={Math.max(1, columns - 1)} height={Math.max(1, rows - 1)} overflow="hidden">
+        <Header version={VERSION} model={selectedConfig.model} workDir={workDir} columns={columns} rows={rows} />
+        <Text color="yellow" wrap="truncate-end">终端至少需要 40×10；草稿已保留。{exitHint || "Ctrl+C 取消/两次退出"}</Text>
+      </Box>}
+      <Box flexDirection="column" {...(tooSmall ? { height: 0, overflow: "hidden" as const } : {})}>
+        <TerminalFrame columns={columns} rows={rows}
+          header={permissionRequest !== null || teamsDialogOpen || noticeExpanded ? null : <Header version={VERSION} model={selectedConfig.model} workDir={workDir} columns={columns} rows={rows} />}
+          footer={<>
+            {!permissionRequest && !teamsDialogOpen && busy && rows >= 16 && <Activity active={busy} label={status === "waiting" ? "等待模型" : iteration === undefined ? "接收回复" : `执行第 ${iteration} 轮`} startedAt={startedAt} />}
+            <NoticePanel notices={[errorMessage && `错误：${errorMessage}`, exitHint, compactNotice, hookNotice && `Hook configuration: ${hookNotice}`, agentNotice && `Agent configuration: ${agentNotice}`, mcpNotice]} columns={columns} maxHeight={Math.max(2, Math.floor(rows / 3))} active={!tooSmall && !permissionRequest && !teamsDialogOpen} onExpandedChange={setNoticeExpanded} />
+            {permissionRequest && (
+              <PermissionDialog
+                key={permissionRequest.id}
+                toolName={permissionRequest.toolName}
+                argsSummary={permissionRequest.argsSummary}
+                reason={permissionRequest.reason}
+                columns={columns}
+                maxHeight={Math.max(6, rows - 4)}
+                onComplete={(action) => {
+                  permissionResolveRef.current?.(action);
+                  permissionResolveRef.current = null;
+                  setPermissionRequest(null);
+                }}
+              />
+            )}
+            {teamsDialogOpen && !permissionRequest && (
+              <TeamsDialog
+                teammates={teammateStates}
+                columns={columns}
+                maxHeight={Math.max(3, rows - 4)}
+                onClose={() => setTeamsDialogOpen(false)}
+                onKill={(name) => {
+                  void teamManagerRef.current?.list().flatMap((team) => team.listMembers()).find((member) => member.name === name)?.cancel?.();
+                }}
+                onShutdown={(name) => {
+                  const member = teamManagerRef.current?.list().flatMap((team) => team.listMembers()).find((candidate) => candidate.name === name);
+                  if (member !== undefined) void member.mailbox.send("lead", "[shutdown] requested from Teams dialog");
+                }}
+              />
+            )}
+            <Box flexDirection="column">
+              <InputBox
+                disabled={busy || permissionRequest !== null || teamsDialogOpen || tooSmall || noticeExpanded}
+                columns={columns}
+                historyKey={workDir}
+                compact={rows < 16 || permissionRequest !== null || teamsDialogOpen || noticeExpanded}
+                maxRows={permissionRequest !== null || teamsDialogOpen ? 1 : Math.max(1, Math.min(8, Math.floor(rows / 3)))}
+                maxSuggestions={Math.max(1, Math.min(8, Math.floor(rows / 4)))}
+                commands={commandRegistryRef.current!.listCommands()}
+                usageTracker={commandUsageTrackerRef.current!}
+                onSubmit={(value, options) => void submit(value, options?.literal ?? false)}
+              />
+              <StatusBar
+                mode={mode}
+                busy={busy}
+                teamCount={teammateStates.length}
+                {...(inputTokens === undefined ? {} : { inputTokens })}
+                {...(outputTokens === undefined ? {} : { outputTokens })}
+              />
+              {rows >= 16 && !permissionRequest && !teamsDialogOpen && !noticeExpanded && <Text dimColor wrap="truncate-end">Enter 发送 · Ctrl+J 换行 · Alt+V 粘贴模式 · PgUp/PgDn 翻页 · Shift+拖选复制 · Ctrl+T 团队</Text>}
+            </Box>
+          </>}>
+          {(height) => <ChatView messages={uiMessages} streamingText={streamingText} activeTools={activeTools} maxHeight={height} columns={Math.max(1, columns - 1)} active={!tooSmall && !permissionRequest && !teamsDialogOpen} />}
+        </TerminalFrame>
       </Box>
     </Box>
   );

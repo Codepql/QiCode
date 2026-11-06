@@ -151,6 +151,25 @@ pnpm dev
 
 退出时输入 `/exit`，或在两秒内连续按两次 `Ctrl+C`。
 
+### 终端操作
+
+| 操作 | 按键 |
+| --- | --- |
+| 发送 / 换行 | Enter / Ctrl+J；支持增强按键的终端也可用 Shift+Enter 或 Alt+Enter 换行 |
+| 移动与编辑 | 方向键、Home/End、Ctrl+A/E、Ctrl+Left/Right、Ctrl+W/U/K |
+| 浏览本次进程的输入历史 | 编辑器首/末显示行处按 ↑/↓，返回时保留未发送草稿 |
+| 手动粘贴模式 | Alt+V（或终端允许时 Ctrl+V）切换；模式中 Enter 只换行，退出模式后 Enter 发送 |
+| 展开 / 折叠长粘贴 | Ctrl+O；折叠块边界处 Backspace/Delete 可整块移除 |
+| 翻阅聊天 / 回到最新 | PageUp/PageDown / Ctrl+End；Ctrl+Home 到开头，也支持鼠标滚轮 |
+| 查看长通知 | Ctrl+N 展开，PageUp/PageDown 浏览，Esc 收起 |
+| 团队面板 / 权限模式 | Ctrl+T / Shift+Tab |
+
+多行粘贴会保留缩进，不自动发送；长粘贴显示折叠摘要，发送的仍是完整正文。粘贴内容按正文处理，不直接执行 Slash 命令。输入上限为 1 MiB UTF-8，超限保留原草稿并提示。
+
+打开弹窗后，键盘只作用于该弹窗。聊天上翻后暂停跟随输出，Ctrl+End 恢复；鼠标捕获开启时可使用终端的 Shift+拖选操作选择复制。窗口小于 40×10 时保留草稿并暂停输入，恢复尺寸后继续编辑。
+
+运行时输入暂时禁用，Esc/Ctrl+C 可取消当前任务；运行中补充意见属于第二期。真实终端输入法和选择复制的兼容性验收状态见 [第一期实现记录](docs/Optimize-plan/terminal-ux/phase-1-implementation.md)。
+
 ## Built-in Tools
 
 | Tool | Description |
