@@ -77,18 +77,18 @@ describe("buildSystemPrompt", () => {
 
   it("appends only the optional sections that contain content", () => {
     const prompt = buildSystemPrompt(fakeEnvironment, {
-      skillSection: "已激活技能",
-      customInstructions: "项目指令",
-      memorySection: "长期记忆",
+      skillSection: "fixture:active-skills",
+      customInstructions: "fixture:project-rules",
+      memorySection: "fixture:durable-memory",
     });
 
-    expect(prompt.indexOf("已激活技能")).toBeLessThan(
-      prompt.indexOf("项目指令"),
+    expect(prompt.indexOf("fixture:active-skills")).toBeLessThan(
+      prompt.indexOf("fixture:project-rules"),
     );
-    expect(prompt.indexOf("项目指令")).toBeLessThan(
-      prompt.indexOf("长期记忆"),
+    expect(prompt.indexOf("fixture:project-rules")).toBeLessThan(
+      prompt.indexOf("fixture:durable-memory"),
     );
-    expect(buildSystemPrompt(fakeEnvironment)).not.toContain("已激活技能");
+    expect(buildSystemPrompt(fakeEnvironment)).not.toContain("fixture:active-skills");
   });
 });
 

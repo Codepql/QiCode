@@ -86,7 +86,7 @@ describe("OpenAIProvider", () => {
       { type: "tool_call_delta", toolId: "call-1", argumentsDelta: "{\"file_" },
       { type: "tool_call_delta", toolId: "call-1", argumentsDelta: "path\":\"README.md\"}" },
       { type: "tool_call_complete", toolId: "call-1", toolName: "ReadFile", arguments: { file_path: "README.md" } },
-      { type: "done", stopReason: "tool_use" },
+      { type: "done", stopReason: "tool_calls" },
     ]);
   });
 });

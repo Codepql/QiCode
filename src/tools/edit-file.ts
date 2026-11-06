@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { EditFileDescription } from "./descriptions.js";
 import { boolArg, strArg, type Tool, type ToolContext, type ToolResult } from "./types.js";
 import { atomicWriteFile } from "../fs/atomic-write.js";
+import { changeSummary, preciseReplace } from "./edit-diff.js";
 import { assertFileVersion, canonicalFilePath, contentHash, withFileLock } from "../fs/file-access.js";
 
 export class EditFileTool implements Tool {
@@ -61,22 +62,9 @@ export class EditFileTool implements Tool {
       }
       const content = await readFile(target, "utf8");
       const expected = contentHash(content);
-      const count = content.split(oldString).length - 1;
-      if (count === 0) {
-        return { output: "错误：文件中未找到 old_string", isError: true };
-      }
-
       const replaceAll = boolArg(args, "replace_all");
-      if (!replaceAll && count > 1) {
-        return {
-          output: `错误：old_string 在文件中找到 ${count} 处。请提供更多上下文使其唯一，或将 replace_all 设为 true。`,
-          isError: true,
-        };
-      }
-
-      const updated = replaceAll
-        ? content.replaceAll(oldString, newString)
-        : content.replace(oldString, newString);
+      const { content: updated, count } = preciseReplace(content, oldString, newString, replaceAll);
+      const diff = changeSummary(content, updated);
       if (ctx.abortSignal?.aborted) throw new Error("File operation cancelled");
       assertFileVersion(target, expected);
       ctx.fileHistory?.trackEdit(target, contentHash(updated));
@@ -85,9 +73,10 @@ export class EditFileTool implements Tool {
       ctx.fileHistory?.recordWrite(target);
       return {
         output: replaceAll && count > 1
-          ? `文件已编辑：${filePath}（替换 ${count} 处）`
-          : `文件已编辑：${filePath}`,
+          ? `文件已编辑：${filePath}（替换 ${count} 处）\n${diff.diff}`
+          : `文件已编辑：${filePath}\n${diff.diff}`,
         isError: false,
+        metadata: { filePath: absolutePath, ...diff, status: "completed" },
       };
       }, ctx.abortSignal);
     } catch (error) {

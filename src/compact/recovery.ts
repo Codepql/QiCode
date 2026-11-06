@@ -1,7 +1,7 @@
 const RECOVERY_FILE_LIMIT = 5;
-const RECOVERY_TOKENS_PER_FILE = 5_000;
-const RECOVERY_SKILLS_BUDGET = 25_000;
-const RECOVERY_TOKENS_PER_SKILL = 5_000;
+const RECOVERY_TOKENS_PER_FILE = 300;
+const RECOVERY_SKILLS_BUDGET = 1_000;
+const RECOVERY_TOKENS_PER_SKILL = 500;
 const RECOVERY_CHARS_PER_TOKEN = 3.5;
 
 export interface FileReadRecord {
@@ -40,7 +40,8 @@ export class RecoveryState {
     return [...this.#skills.values()].sort((a, b) => b.timestamp - a.timestamp);
   }
 
-  buildRecoveryAttachment(toolSchemaNames: readonly string[]): string {
+  buildRecoveryAttachment(toolSchemaNames: readonly string[], tokenBudget = 4_000): string {
+    if (tokenBudget <= 0) return "";
     const sections: string[] = [];
     const files = this.snapshotFiles();
     if (files.length > 0) sections.push(buildFilesSection(files));
@@ -56,7 +57,10 @@ export class RecoveryState {
     }
 
     if (sections.length === 0) return "";
-    return `${sections.join("\n\n")}\n\n## Note\nThis is recovery context from before compaction. Re-open files or call tools when current data is needed.`;
+    const attachment = `${sections.join("\n\n")}\n\n## Note\nThese are bounded snapshots of observed tool results, not complete or current source files. Re-open the relevant lines when needed.`;
+    const limit = Math.floor(tokenBudget * RECOVERY_CHARS_PER_TOKEN);
+    const note = "\n[Recovery preview shortened; re-open relevant files.]";
+    return attachment.length <= limit ? attachment : attachment.slice(0, Math.max(0, limit - note.length)) + note.slice(0, limit);
   }
 }
 

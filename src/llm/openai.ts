@@ -6,11 +6,13 @@ import {
   normalizeFetchError,
   parseSSE,
   ProviderResponseError,
+  StreamProtocolError,
   requireResponseBody,
   type ChatRequest,
   type Provider,
 } from "./client.js";
 import type { StreamEvent } from "./events.js";
+import { parseToolArguments } from "./tool-arguments.js";
 
 type FetchLike = typeof fetch;
 
@@ -44,6 +46,7 @@ export class OpenAIProvider implements Provider {
             ],
             stream: true,
             stream_options: { include_usage: true },
+            ...(request.maxOutputTokens === undefined ? {} : { max_tokens: request.maxOutputTokens }),
             ...(request.tools === undefined || request.tools.length === 0
               ? {}
               : {
@@ -73,7 +76,8 @@ export class OpenAIProvider implements Provider {
         request.signal === undefined ? {} : { signal: request.signal },
       )) {
         if (message.data.trim() === "[DONE]") {
-          if (!doneEmitted) yield { type: "done" };
+          if (!doneEmitted && toolCalls.size > 0) throw new StreamProtocolError("Tool stream ended without finish_reason");
+          if (!doneEmitted) yield { type: "done", stopReason: "stop" };
           return;
         }
 
@@ -133,7 +137,7 @@ export class OpenAIProvider implements Provider {
 
           const stopReason = stringValue(choice?.finish_reason);
           if (stopReason && !doneEmitted) {
-            for (const toolCall of toolCalls.values()) {
+            for (const toolCall of stopReason === "length" || stopReason === "content_filter" ? [] : toolCalls.values()) {
               if (!toolCall.id || !toolCall.name) {
                 throw new ProviderResponseError("OpenAI tool call is missing id or function name");
               }
@@ -146,7 +150,7 @@ export class OpenAIProvider implements Provider {
             }
             yield {
               type: "done",
-              stopReason: stopReason === "tool_calls" || toolCalls.size > 0 ? "tool_use" : stopReason,
+              stopReason,
             };
             doneEmitted = true;
           }
@@ -156,7 +160,7 @@ export class OpenAIProvider implements Provider {
       normalizeFetchError(error, request.signal);
     }
 
-    if (!doneEmitted) yield { type: "done" };
+    if (!doneEmitted) throw new StreamProtocolError("OpenAI stream closed without a terminal event");
   }
 }
 
@@ -218,15 +222,4 @@ function stringValue(value: unknown): string | undefined {
 }
 function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function parseToolArguments(argumentsJson: string): Record<string, unknown> {
-  if (argumentsJson.trim() === "") return {};
-  try {
-    const value: unknown = JSON.parse(argumentsJson);
-    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      return value as Record<string, unknown>;
-    }
-  } catch {}
-  return {};
 }

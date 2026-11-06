@@ -102,20 +102,14 @@ describe("AnthropicProvider", () => {
     ]);
   });
 
-  it("emits done when an otherwise valid stream closes before message_stop", async () => {
+  it("rejects an interrupted stream instead of inventing a successful terminal event", async () => {
     const fetchImpl = (async () => response([
       event({ type: "message_start", message: { usage: { input_tokens: 2 } } }),
       event({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial" } }),
     ])) as typeof fetch;
     const provider = new AnthropicProvider(config, fetchImpl);
 
-    const events = await collect(provider.stream({ systemPrompt: "system", messages: [] }));
-
-    expect(events).toEqual([
-      { type: "usage", inputTokens: 2, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
-      { type: "text_delta", text: "partial" },
-      { type: "done" },
-    ]);
+    await expect(collect(provider.stream({ systemPrompt: "system", messages: [] }))).rejects.toThrow("before message_stop");
   });
 });
 

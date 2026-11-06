@@ -7,6 +7,7 @@ export interface ChatRequest {
   messages: ConversationMessage[];
   tools?: ToolDefinition[];
   signal?: AbortSignal;
+  maxOutputTokens?: number;
 }
 
 export interface Provider {
@@ -88,6 +89,14 @@ export class AbortProviderError extends ProviderError {
   }
 }
 
+/** Safe to retry the model request: tools have not been executed yet. */
+export class StreamProtocolError extends ProviderResponseError {}
+
+export class TransientProviderError extends ProviderError {
+  readonly code = "server";
+  constructor(readonly status: number) { super(`Provider request failed with HTTP ${status}`); }
+}
+
 export function formatProviderError(
   error: unknown,
   secrets: readonly string[] = [],
@@ -136,6 +145,7 @@ export async function assertSuccessfulResponse(response: Response): Promise<void
   if (response.status === 429) {
     throw new RateLimitError(retryAfter);
   }
+  if (response.status >= 500) throw new TransientProviderError(response.status);
   if (
     response.status === 413
     || body.includes("context_length")
@@ -156,7 +166,7 @@ export function normalizeFetchError(error: unknown, signal?: AbortSignal): never
     throw new AbortProviderError();
   }
   if (
-    error instanceof AuthenticationError
+    error instanceof ProviderError
     || error instanceof RateLimitError
     || error instanceof ContextTooLongError
     || error instanceof ProviderResponseError

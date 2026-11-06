@@ -3,6 +3,19 @@ export type ToolCategory = "read" | "write" | "command";
 export interface ToolResult {
   output: string;
   isError: boolean;
+  metadata?: ToolMetadata;
+}
+
+export interface ToolMetadata {
+  status?: "completed" | "failed" | "cancelled" | "timeout" | "not_executed" | "unknown";
+  exitCode?: number | null;
+  elapsed?: number;
+  cwd?: string;
+  logPath?: string;
+  truncated?: boolean;
+  filePath?: string;
+  firstChangedLine?: number;
+  diff?: string;
 }
 
 export interface ToolContext {
@@ -19,6 +32,13 @@ export interface ToolContext {
   environment?: NodeJS.ProcessEnv;
   /** 比工具默认上限更严格的输出字节限制。 */
   maxOutputBytes?: number;
+  maxLogBytes?: number;
+  commandTimeoutSeconds?: number;
+  maxCommandTimeoutSeconds?: number;
+  onUpdate?(output: string): void;
+  onToolStart?(toolId: string, toolName: string, args: Record<string, unknown>): void;
+  onToolUpdate?(toolId: string, toolName: string, output: string): void;
+  onToolEnd?(toolId: string, toolName: string, result: ToolResult): void;
 }
 
 export interface Tool {

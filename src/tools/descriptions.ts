@@ -1,5 +1,5 @@
 export const BashDescription =
-  "在工作目录中执行 Shell 命令。重要：有专用工具时绝不要使用 Bash；不要用它运行 cat、head、tail、sed、awk 或 echo 来代替 ReadFile、EditFile、WriteFile、Glob 或 Grep。不要执行破坏性的 Git 命令，也不要隐藏错误信息。";
+  "在工作目录中执行 Git、项目脚本等 Shell 命令，使用环境中指定的实际 Shell 语法。文件读取、搜索和编辑使用对应专用工具；不要绕过权限或版本检查。保留退出码和错误信息；仅在用户请求或任务需要时运行相关验证。";
 
 export const ReadFileDescription =
   "读取带行号的文本文件。使用 offset 和 limit 只查看相关片段；路径不确定时，先使用 Glob 查找文件。";

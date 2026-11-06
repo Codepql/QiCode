@@ -17,7 +17,7 @@ describe("context compaction", () => {
 
   it("summarizes old history and preserves recent messages", async () => {
     const conversation = new Conversation();
-    for (let index = 0; index < 7; index += 1) conversation.addUserMessage(`message ${index}`);
+    for (let index = 0; index < 7; index += 1) conversation.addUserMessage(`message ${index}: ${"source context ".repeat(100)}`);
 
     const result = await forceCompact(conversation, new SummaryProvider(), new RecoveryState(), ["ReadFile"]);
 

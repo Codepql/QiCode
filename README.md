@@ -168,9 +168,25 @@ pnpm dev
 
 打开弹窗后，键盘只作用于该弹窗。聊天上翻后暂停跟随输出，Ctrl+End 恢复；鼠标捕获开启时可使用终端的 Shift+拖选操作选择复制。窗口小于 40×10 时保留草稿并暂停输入，恢复尺寸后继续编辑。
 
-运行时输入暂时禁用，Esc/Ctrl+C 可取消当前任务；运行中补充意见属于第二期。真实终端输入法和选择复制的兼容性验收状态见 [第一期实现记录](docs/Optimize-plan/terminal-ux/phase-1-implementation.md)。
+运行中可继续编辑并按 Enter 提交当前任务补充，在下一工具批次或模型请求边界生效；Alt+Q 取回最近一条未消费补充。Esc/Ctrl+C 可取消当前任务，已生效的修改保留。真实终端输入法和选择复制的兼容性验收状态见 [第一期实现记录](docs/Optimize-plan/terminal-ux/phase-1-implementation.md)。
+
+第二期加入了命令实时输出与日志、编辑 diff、修改后的验证记录、结构化会话恢复和执行预算。默认总任务预算 15 分钟，模型响应空闲上限 120 秒，单命令默认 120 秒、可指定到 600 秒；权限等待暂停总任务计时。模型可用 Bash 的 `purpose: verification` 标记检查，验证失败会回到执行循环，最多 3 轮失败修复。代码改变后，旧验证记录不再作为当前通过证据。
+
+可在现有配置中增加 `execution`，例如 `{ "taskTimeoutMs": 900000, "maxIterations": 80 }`；`model_capabilities` 按模型名配置 `{ "contextWindow": 128000, "maxOutput": 8192 }`。未配置模型能力时采用 32768 上下文窗口。完整实现范围和待验收项见 [第二期实现记录](docs/Optimize-plan/terminal-ux/phase-2-implementation.md)。
 
 ## Built-in Tools
+
+### 会话与长期使用
+
+常见的独立 `git diff` / `git log` / `git show` 查看命令自动放行，执行时禁用外部 diff、textconv 等辅助程序；复合命令仍按原权限处理。首次授权时可直接按 **T**，允许本次任务中的文件编辑和普通命令，任务结束失效，不落盘；已识别的发布、删除、外部操作、显式权限规则和结果未知操作单独处理。也可按 Y 仅允许本次调用、A 记住这条操作、N 拒绝，无需回车。`/permission mode acceptEdits` 自动允许工作区文件编辑；`/permission mode bypassPermissions` 允许普通工具连续执行，内置危险命令、路径边界和显式拒绝规则仍然生效。
+
+`/resume` 搜索和预览会话，`/resume latest` 恢复最近会话，`/rename 标题` 命名，`/new` 新建。`/model` 选择已配置模型，运行中登记的切换在任务结束后生效。快捷入口为 Alt+S 会话、Alt+M 模型、Alt+T 任务、Alt+B 设置，`/hotkeys` 查看完整按键。
+
+`/files` 或输入 `@路径` 后按 Tab 搜索文件，确认后引用路径而不自动注入整份正文；`/files remove 序号` 移除引用。`/tasks` 查看任务详情，Ctrl+X 取消所选任务。`/rewind` 先预览检查点，再选择文件或文件与对话的恢复范围。
+
+`/settings` 保存项目级布局、显示和安全权限偏好，存储在 `.qicode/ui.json`；`/settings bind tasks alt+b` 可调整入口按键，冲突会拒绝保存。详细范围见 [第三期实现记录](docs/Optimize-plan/terminal-ux/phase-3-implementation.md)。
+
+### 工具列表
 
 | Tool | Description |
 | --- | --- |

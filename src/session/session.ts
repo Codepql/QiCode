@@ -188,6 +188,7 @@ export function cleanExpiredSessions(workDir: string, now = new Date()): number 
 }
 
 export function rebuildFromSession(saved: readonly SessionMessage[]): RestoredMessage[] {
+  if (hasStructuredMessages(saved)) return replayStructured(saved);
   const boundaryIndex = findLastBoundary(saved);
   if (boundaryIndex === -1) return replayMessages(saved);
 
@@ -200,6 +201,60 @@ export function rebuildFromSession(saved: readonly SessionMessage[]): RestoredMe
   }, ...payload.keep];
   restored.push(...replayMessages(saved.slice(boundaryIndex + 1)));
   return restored;
+}
+
+export function hasStructuredMessages(saved: readonly SessionMessage[]): boolean {
+  return saved.some((entry) => {
+    if (entry.type !== "messages_v2") return false;
+    try { const frame: unknown = JSON.parse(entry.content); return isRecord(frame) && frame.version === 2 && frame.start === 0 && Array.isArray(frame.messages) && frame.messages.every(isKeptMessage); }
+    catch { return false; }
+  });
+}
+
+function replayStructured(saved: readonly SessionMessage[]): RestoredMessage[] {
+  const messages: RestoredMessage[] = [];
+  const outcomes = new Map<string, { output: string; isError: boolean } | null>();
+  let report = "";
+  for (const entry of saved) {
+    if (entry.type === "messages_v2") {
+      try {
+        const frame: unknown = JSON.parse(entry.content);
+        if (isRecord(frame) && frame.version === 2 && Number.isInteger(frame.start) && Number(frame.start) >= 0 && Number(frame.start) <= messages.length
+          && Array.isArray(frame.messages) && frame.messages.every(isKeptMessage)) {
+          messages.splice(Number(frame.start), messages.length, ...frame.messages);
+        }
+      } catch { /* Retain the last valid state. */ }
+    } else if (entry.type === COMPACT_BOUNDARY) {
+      const boundary = parseBoundary(entry.content);
+      if (boundary) messages.splice(0, messages.length, { role: "user", content: [{ type: "text", text: buildResumeSummary(boundary.summary, boundary.keep.length) }] }, ...boundary.keep);
+    } else if (entry.type === "tool_intent_v2" || entry.type === "tool_outcome_v2") {
+      try {
+        const payload: unknown = JSON.parse(entry.content);
+        if (isRecord(payload) && typeof payload.id === "string") {
+          if (entry.type === "tool_intent_v2") outcomes.set(payload.id, null);
+          else if (isRecord(payload.result) && typeof payload.result.output === "string" && typeof payload.result.isError === "boolean") outcomes.set(payload.id, { output: payload.result.output, isError: payload.result.isError });
+        }
+      } catch { /* Missing or damaged outcome is unknown, never safe to replay. */ }
+    } else if (entry.type === "delivery_v2") report = entry.content;
+    else if (entry.type === undefined && isRestorableRole(entry.role)) messages.push({ role: entry.role, content: [{ type: "text", text: entry.content }] });
+  }
+  const pending = new Map<string, string>();
+  for (const message of messages) for (const block of message.content) {
+    if (block.type === "tool_use") pending.set(block.id, block.name);
+    else if (block.type === "tool_result") pending.delete(block.toolUseId);
+  }
+  if (pending.size) messages.push({ role: "user", content: [...pending].map(([id, name]) => {
+    const result = outcomes.get(id);
+    return { type: "tool_result" as const, toolUseId: id, isError: result?.isError ?? true,
+      ...(result ? {} : { executionState: outcomes.has(id) ? "unknown" as const : "not_executed" as const }),
+      content: result?.output ?? (outcomes.has(id) ? `工具 ${name} 曾开始但结果未知；请核对磁盘/进程，禁止自动重放副作用。` : `工具 ${name} 未开始执行；请重新判断下一步。`) };
+  }) });
+  if (pending.size || report) {
+    const reminder: RestoredMessage = { role: "user", content: [{ type: "text", text: `<system-reminder>\n已恢复结构化工作现场。先核对当前磁盘与任务剩余步骤；恢复不意味着旧命令仍在运行。${report ? `\n上次交付记录（历史事实，未证明当前文件仍一致）：${report}` : ""}\n</system-reminder>` }] };
+    const prior = messages.findLastIndex((message) => message.role === "user" && message.content.some((block) => block.type === "text" && block.text.startsWith("<system-reminder>\n已恢复结构化工作现场。")));
+    if (prior < 0) messages.push(reminder); else messages[prior] = reminder;
+  }
+  return messages;
 }
 
 function validateSessionId(sessionId: string): void {

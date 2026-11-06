@@ -1,4 +1,5 @@
 import type { ProviderConfig } from "../config/types.js";
+import type { ModelCapabilities } from "../agent/execution.js";
 import { createProvider, type Provider } from "../llm/client.js";
 import { buildSystemPrompt, detectEnvironment } from "../prompt/builder.js";
 import type { EnvironmentContext } from "../prompt/sections.js";
@@ -93,6 +94,6 @@ export function createToolRegistry(): ToolRegistry {
   return registry;
 }
 
-export function contextWindowFor(config: ProviderConfig): number {
-  return config.protocol === "anthropic" ? 200_000 : 128_000;
+export function contextWindowFor(config: ProviderConfig, capabilities: Record<string, ModelCapabilities> = {}): number {
+  return capabilities[config.model]?.contextWindow ?? 32_768;
 }

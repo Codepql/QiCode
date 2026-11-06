@@ -1,9 +1,13 @@
 import { spawn, spawnSync } from "node:child_process";
+import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { readOnlyGitCommand } from "../permissions/git-readonly.js";
+import { join } from "node:path";
+import { resolveShell, shellArgs } from "./shell.js";
 import { BashDescription } from "./descriptions.js";
 import { intArg, strArg, type Tool, type ToolContext, type ToolResult } from "./types.js";
 
 const MAX_TIMEOUT_SECONDS = 600;
-const MAX_OUTPUT_BYTES = 10 * 1024 * 1024;
 
 // Windows 控制台代码页 -> TextDecoder 标签（中文系统常见 936/GBK）。
 const CODEPAGE_LABELS: Record<number, string> = {
@@ -94,124 +98,107 @@ export class BashTool implements Tool {
         properties: {
           command: { type: "string", description: "要执行的 Shell 命令" },
           timeout: { type: "integer", default: 120, description: "超时时间，单位为秒" },
+          purpose: { type: "string", enum: ["verification", "task"], description: "验证测试/构建时填写 verification，用于记录真实验证结果" },
         },
         required: ["command"],
       },
     };
   }
 
-  execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
+  async execute(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult> {
     const command = strArg(args, "command");
-    if (!command) return Promise.resolve({ output: "错误：command 是必填项", isError: true });
-
-    const requestedTimeout = intArg(args, "timeout", 120);
-    const timeoutSeconds = Math.min(Math.max(requestedTimeout, 1), MAX_TIMEOUT_SECONDS);
-    const outputLimit = Math.min(
-      Math.max(ctx.maxOutputBytes ?? MAX_OUTPUT_BYTES, 1),
-      MAX_OUTPUT_BYTES,
-    );
-    const shell = process.platform === "win32"
-      ? (process.env["COMSPEC"] ?? "cmd.exe")
-      : "/bin/sh";
-
+    if (!command) return { output: "错误：command 是必填项", isError: true };
+    if (ctx.abortSignal?.aborted) return { output: "错误：命令已取消，未执行", isError: true, metadata: { status: "cancelled" } };
+    const timeoutSeconds = Math.min(Math.max(intArg(args, "timeout", ctx.commandTimeoutSeconds ?? 120), 1), ctx.maxCommandTimeoutSeconds ?? MAX_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS);
+    const previewLimit = Math.max(1, Math.min(ctx.maxOutputBytes ?? 64_000, 64_000));
+    const logLimit = Math.max(1, ctx.maxOutputBytes ?? ctx.maxLogBytes ?? 100 * 1024 * 1024);
+    const shell = resolveShell();
+    const directory = join(ctx.workDir, ".qicode", "tool_results");
+    mkdirSync(directory, { recursive: true });
+    const logPath = join(directory, `command-${randomUUID()}.log`);
+    const fd = openSync(logPath, "wx", 0o600);
     return new Promise((resolve) => {
-      const stdoutChunks: Buffer[] = [];
-      const stderrChunks: Buffer[] = [];
-      let outputBytes = 0;
-      let timedOut = false;
-      let aborted = false;
-      let outputTooLarge = false;
+      const started = Date.now();
+      let bytes = 0;
+      let tail = Buffer.alloc(0);
       let settled = false;
-
-      const child = spawn(command, {
-        cwd: ctx.workDir,
-        stdio: ["ignore", "pipe", "pipe"],
-        shell,
-        env: { ...process.env, ...ctx.environment },
-        detached: process.platform !== "win32",
-        windowsHide: true,
+      let status: "completed" | "failed" | "cancelled" | "timeout" = "completed";
+      let problem = "";
+      let quotaExceeded = false;
+      let updateTimer: ReturnType<typeof setTimeout> | undefined;
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
+      const child = spawn(shell.file, shellArgs(shell, readOnlyGitCommand(command) ?? command), {
+        cwd: ctx.workDir, stdio: ["ignore", "pipe", "pipe"], shell: false,
+        env: { ...process.env, ...ctx.environment }, detached: process.platform !== "win32",
+        windowsHide: true, windowsVerbatimArguments: shell.kind === "cmd",
       });
-
-      const finish = (result: ToolResult): void => {
+      const preview = (): string => decodeChildOutput(tail);
+      const notify = (): void => { updateTimer = undefined; ctx.onUpdate?.(preview()); };
+      const finish = (exitCode: number | null, confirmed = true): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
+        clearTimeout(updateTimer);
+        clearTimeout(killTimer);
         ctx.abortSignal?.removeEventListener("abort", abort);
-        resolve(result);
-      };
-
-      const terminate = (): void => {
-        if (child.killed || child.pid === undefined) return;
-        if (process.platform === "win32") {
-          spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
-            stdio: "ignore",
-            windowsHide: true,
-          });
-          return;
-        }
-        try {
-          process.kill(-child.pid, "SIGTERM");
-        } catch {
-          child.kill("SIGTERM");
-        }
-      };
-
-      const append = (target: "stdout" | "stderr", chunk: Buffer): void => {
-        outputBytes += chunk.byteLength;
-        if (outputBytes > outputLimit) {
-          outputTooLarge = true;
-          terminate();
-          return;
-        }
-        if (target === "stdout") stdoutChunks.push(chunk);
-        else stderrChunks.push(chunk);
-      };
-
-      const abort = (): void => {
-        aborted = true;
-        terminate();
-      };
-      const timeout = setTimeout(() => {
-        timedOut = true;
-        terminate();
-        // Do not keep the chat waiting if Windows cannot immediately reap a child process.
-        finish({ output: `错误：命令执行超过 ${timeoutSeconds} 秒`, isError: true });
-      }, timeoutSeconds * 1000);
-
-      child.stdout.on("data", (chunk: Buffer) => append("stdout", chunk));
-      child.stderr.on("data", (chunk: Buffer) => append("stderr", chunk));
-      child.once("error", (error) => {
-        finish({ output: `错误：启动命令失败：${error.message}`, isError: true });
-      });
-      child.once("close", (exitCode, signal) => {
-        if (timedOut) {
-          finish({ output: `错误：命令执行超过 ${timeoutSeconds} 秒`, isError: true });
-          return;
-        }
-        if (aborted) {
-          finish({ output: "错误：命令已取消", isError: true });
-          return;
-        }
-        if (outputTooLarge) {
-          finish({ output: `错误：命令输出超过 ${formatByteLimit(outputLimit)} 上限`, isError: true });
-          return;
-        }
-        if (exitCode === null) {
-          finish({ output: `错误：命令被信号 ${signal ?? "unknown"} 终止`, isError: true });
-          return;
-        }
-
-        const stdout = decodeChildOutput(Buffer.concat(stdoutChunks));
-        const stderr = decodeChildOutput(Buffer.concat(stderrChunks));
+        closeSync(fd);
+        const truncated = bytes > tail.length;
         const output = [
-          `$ ${command}`,
-          stdout,
-          stderr ? `标准错误：${stderr}` : "",
-          `退出码：${exitCode}`,
+          `$ ${command}`, preview(), problem,
+          exitCode === null ? "" : `退出码：${exitCode}`,
+          truncated ? `[输出预览已截断，完整日志：${logPath}]` : `日志：${logPath}`,
+          !confirmed ? "子进程退出尚未确认；请核对进程状态，不要盲目重放命令。" : "",
         ].filter(Boolean).join("\n");
-        finish({ output, isError: interpretExitCode(command, exitCode) });
+        resolve({ output, isError: status !== "completed" || exitCode === null || interpretExitCode(command, exitCode),
+          metadata: { status: status === "completed" && (exitCode === null || interpretExitCode(command, exitCode)) ? "failed" : status,
+            exitCode, elapsed: (Date.now() - started) / 1000, cwd: ctx.workDir, logPath, truncated } });
+      };
+      const terminate = (): void => {
+        if (child.pid === undefined) { finish(null); return; }
+        if (process.platform === "win32") {
+          const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+          killer.on("error", () => child.kill());
+        } else {
+          try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+        }
+        killTimer ??= setTimeout(() => {
+          if (process.platform !== "win32" && child.pid) {
+            try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+          }
+          finish(null, false);
+        }, 2500);
+      };
+      const append = (chunk: Buffer): void => {
+        if (settled) return;
+        const remaining = Math.max(0, logLimit - bytes);
+        const kept = chunk.subarray(0, remaining);
+        try { if (kept.length) writeSync(fd, kept); }
+        catch { status = "failed"; problem = "错误：命令日志写入失败"; terminate(); return; }
+        bytes += kept.length;
+        tail = Buffer.concat([tail, kept]).subarray(-previewLimit);
+        if (shell.kind === "powershell") {
+          let start = 0;
+          while (start < tail.length && (tail[start]! & 0xc0) === 0x80) start++;
+          tail = tail.subarray(start);
+        }
+        if (ctx.onUpdate && !updateTimer) updateTimer = setTimeout(notify, 80);
+        if (kept.length < chunk.length && !quotaExceeded) {
+          quotaExceeded = true; status = "failed";
+          problem = `错误：命令日志超过 ${formatByteLimit(logLimit)} 上限，日志不完整`;
+          terminate();
+        }
+      };
+      const abort = (): void => { status = "cancelled"; problem = "错误：命令已取消"; terminate(); };
+      const timeout = setTimeout(() => {
+        status = "timeout"; problem = `错误：命令执行超过 ${timeoutSeconds} 秒`; terminate();
+      }, timeoutSeconds * 1000);
+      child.stdout.on("data", append);
+      child.stderr.on("data", append);
+      child.once("error", (error) => { status = "failed"; problem = `错误：启动命令失败：${error.message}`; finish(null); });
+      child.once("close", (exitCode, signal) => {
+        if (signal && !problem) problem = `命令被信号 ${signal} 终止`;
+        finish(exitCode);
       });
-
       if (ctx.abortSignal?.aborted) abort();
       else ctx.abortSignal?.addEventListener("abort", abort, { once: true });
     });

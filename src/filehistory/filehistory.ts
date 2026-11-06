@@ -117,6 +117,25 @@ export class FileHistory {
     return withFileLocksSync([this.indexPath, ...paths], () => this.rewindLocked(snapshotIndex));
   }
 
+  /** Read-only preview; rewind still revalidates hashes under locks at confirmation. */
+  previewRewind(snapshotIndex: number): { files: string[]; conflicts: string[] } {
+    const snapshots = this.getSnapshots();
+    if (!Number.isInteger(snapshotIndex) || snapshotIndex < 0 || snapshotIndex >= snapshots.length) throw new Error("Unknown checkpoint index");
+    const restore = new Map<string, { before: string | null; expected: string | null | undefined }>();
+    const conflicts = new Set<string>();
+    for (const snapshot of snapshots.slice(snapshotIndex)) for (const backup of Object.values(snapshot.backups)) {
+      this.assertProjectPath(backup.path);
+      const prior = restore.get(backup.path);
+      if (prior && prior.expected !== backup.beforeHash) conflicts.add(backup.path);
+      restore.set(backup.path, { before: prior ? prior.before : backup.beforeHash, expected: backup.afterHash });
+    }
+    for (const [path, version] of restore) {
+      const current = fileHash(path);
+      if (current !== version.before && (version.expected === undefined || current !== version.expected)) conflicts.add(path);
+    }
+    return { files: [...restore.keys()], conflicts: [...conflicts] };
+  }
+
   private rewindLocked(snapshotIndex: number): string[] {
     const all = this.getSnapshots();
     if (!Number.isInteger(snapshotIndex) || snapshotIndex < 0 || snapshotIndex >= all.length) return [];
