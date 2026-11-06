@@ -42,6 +42,7 @@ describe("App", () => {
     const view = render(<App providers={[providerConfig]} />);
 
     expect(view.lastFrame()).toContain(`QiCode v${VERSION}`);
+    expect(view.lastFrame()).toContain("( o.o )");
     expect(view.lastFrame()).toContain("test-model");
     expect(view.lastFrame()).not.toContain("openai · test-model");
     expect(view.lastFrame()).not.toContain("Static preview only");

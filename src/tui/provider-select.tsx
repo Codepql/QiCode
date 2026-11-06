@@ -1,4 +1,5 @@
-import { Box, Text, useInput } from "ink";
+import { Box, Text } from "ink";
+import { useRoutedInput } from "./input-router.js";
 import { useState } from "react";
 import type { ProviderConfig } from "../config/types.js";
 
@@ -10,7 +11,8 @@ export interface ProviderSelectProps {
 export function ProviderSelect({ providers, onSelect }: ProviderSelectProps) {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  useInput((_input, key) => {
+  useRoutedInput(100, (input, key) => {
+    if (key.ctrl && input === "c") return false;
     if (providers.length === 0) return;
     if (key.upArrow) {
       setSelectedIndex((index) => (index - 1 + providers.length) % providers.length);
@@ -19,6 +21,7 @@ export function ProviderSelect({ providers, onSelect }: ProviderSelectProps) {
     } else if (key.return) {
       onSelect(providers[selectedIndex]!);
     }
+    return true;
   });
 
   if (providers.length === 0) {
