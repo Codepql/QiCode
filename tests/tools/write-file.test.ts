@@ -25,8 +25,8 @@ describe("WriteFileTool", () => {
       { workDir },
     );
 
-    expect(result).toEqual({
-      output: "文件已写入：a/b/demo.txt（2 行）",
+    expect(result).toMatchObject({
+      output: expect.stringContaining("文件已写入：a/b/demo.txt（2 行）"),
       isError: false,
     });
     expect(await readFile(join(workDir, "a", "b", "demo.txt"), "utf8")).toBe(

@@ -153,6 +153,7 @@ function cloneBlock(block: ConversationBlock): ConversationBlock {
         toolUseId: block.toolUseId,
         content: block.content,
         isError: block.isError,
+        ...(block.executionState ? { executionState: block.executionState } : {}),
       };
   }
 }

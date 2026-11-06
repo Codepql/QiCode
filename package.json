@@ -30,6 +30,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "benchmark:offline": "tsx benchmarks/run.ts --offline",
     "prepublishOnly": "pnpm run typecheck && pnpm run build"
   },
   "keywords": [],

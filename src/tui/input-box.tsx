@@ -17,10 +17,14 @@ export interface InputBoxProps {
   permMode?: PermissionMode;
   commands?: readonly Command[];
   usageTracker?: CommandUsageTracker;
-  onSubmit(value: string, options?: { literal: boolean }): void;
+  onSubmit(value: string, options?: { literal: boolean }): void | boolean;
+  onDequeue?(): string | undefined;
+  onDraftChange?(value: string): void;
+  restoredDraft?: { id: number; value: string };
+  onFileSearch?(query: string, range: { start: number; end: number }): void;
 }
 
-export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestions = 8, historyKey = "", compact = false, commands = [], usageTracker, onSubmit }: InputBoxProps) {
+export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestions = 8, historyKey = "", compact = false, commands = [], usageTracker, onSubmit, onDequeue, onDraftChange, restoredDraft, onFileSearch }: InputBoxProps) {
   const window = useWindowSize();
   const width = Math.max(1, (columns ?? window.columns ?? 80) - 3);
   const [editor, setEditor] = useState(emptyEditor);
@@ -45,8 +49,11 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
     // A cursor reached through line/word navigation must never stay hidden
     // inside a folded paste. Reveal that range before the next edit.
     next = { ...next, pastes: next.pastes.map((part) => part.collapsed && next.cursor > part.start && next.cursor < part.end ? { ...part, collapsed: false } : part) };
-    state.current = next; setEditor(next);
+    state.current = next; setEditor(next); onDraftChange?.(next.value);
   }
+  useEffect(() => {
+    if (restoredDraft) update({ ...emptyEditor(), value: restoredDraft.value, cursor: restoredDraft.value.length });
+  }, [restoredDraft?.id]);
   function dismiss(value: boolean): void { dismissedRef.current = value; setDismissed(value); }
   function manualPaste(value: boolean): void { pasteModeRef.current = value; setPasteMode(value); }
   function resetCandidates(): void { selectedIndex.current = 0; setDropdownIndex(0); dismiss(false); }
@@ -91,6 +98,7 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
     const currentDropdown = !pasteModeRef.current && !state.current.literal && state.current.value.startsWith("/") && !/\s/.test(currentQuery) && !dismissedRef.current;
     const currentCandidates = currentQuery === query ? candidates : completions(currentQuery, commands, usageTracker);
     if (key.ctrl && (input === "c" || input === "t") || key.tab && key.shift) return false;
+    if (key.meta && input === "q" && onDequeue) { const text = onDequeue(); if (text) insert(text, true); return true; }
     if ((key.ctrl || key.meta) && input === "v") { manualPaste(!pasteModeRef.current); dismiss(true); return true; }
     if (key.ctrl && input === "o") {
       const collapse = state.current.pastes.some((part) => !part.collapsed);
@@ -112,6 +120,8 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
     if (input === "\n" || key.ctrl && input === "j" || key.return && (key.shift || key.meta)) { insert("\n", pasteModeRef.current); return true; }
     if (key.return && pasteModeRef.current) { insert("\n", true); return true; }
     if (key.return || key.tab) {
+      const mention = /(?:^|\s)@(?:"([^"]*)|([^\s"]*))$/.exec(state.current.value.slice(0, state.current.cursor));
+      if (key.tab && mention && onFileSearch) { onFileSearch(mention[1] ?? mention[2] ?? "", { start: mention.index + mention[0].indexOf("@"), end: state.current.cursor }); return true; }
       const selected = currentCandidates[Math.min(selectedIndex.current, currentCandidates.length - 1)];
       if (currentDropdown && selected && (key.tab || currentQuery !== selected.name && !selected.aliases.includes(currentQuery))) {
         update({ ...emptyEditor(), value: `/${selected.name} `, cursor: selected.name.length + 2 }); resetCandidates(); return true;
@@ -119,9 +129,9 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
       if (key.tab) return true;
       const current = state.current;
       if (current.value.trim()) {
+        if (onSubmit(current.value, { literal: current.literal }) === false) return true;
         if (history.current.at(-1) !== current.value) history.current = [...history.current, current.value].slice(-100);
         historyIndex.current = -1; update(emptyEditor()); resetCandidates();
-        onSubmit(current.value, { literal: current.literal });
       }
       return true;
     }

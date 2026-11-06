@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { load as loadYaml } from "js-yaml";
+import { parseExecution } from "../agent/execution.js";
 import type {
   AppConfig,
   MCPConfig,
@@ -109,6 +110,8 @@ function mergeConfig(base: AppConfig, override: AppConfig): AppConfig {
       ? override.providers.map(cloneProvider)
       : base.providers.map(cloneProvider),
     hooks: [...base.hooks, ...override.hooks],
+    ...(base.execution || override.execution ? { execution: { ...base.execution, ...override.execution } } : {}),
+    ...(base.model_capabilities || override.model_capabilities ? { model_capabilities: { ...base.model_capabilities, ...override.model_capabilities } } : {}),
   };
 }
 
@@ -167,7 +170,7 @@ async function loadProviderConfigFile(
   const root = requireRecord(document, "configuration root");
   const rootFields = Object.keys(root);
   const unsupportedRootField = rootFields.find(
-    (field) => field !== "providers" && field !== "hooks" && !SIMPLE_CONFIG_FIELDS.has(field),
+    (field) => field !== "providers" && field !== "hooks" && field !== "execution" && field !== "model_capabilities" && !SIMPLE_CONFIG_FIELDS.has(field),
   );
   if (unsupportedRootField) {
     throw new ConfigError(`Unsupported configuration field: ${unsupportedRootField}`);
@@ -194,7 +197,20 @@ async function loadProviderConfigFile(
   }
 
   const hooks = parseOptionalArray(root, "hooks", "hooks");
-  return { providers, hooks };
+  let execution: AppConfig["execution"];
+  if (root.execution !== undefined) {
+    try { execution = parseExecution(root.execution); } catch (error) { throw new ConfigError(error instanceof Error ? error.message : "Invalid execution settings"); }
+  }
+  const capabilities: NonNullable<AppConfig["model_capabilities"]> = Object.create(null) as NonNullable<AppConfig["model_capabilities"]>;
+  if (root.model_capabilities !== undefined) {
+    for (const [model, value] of Object.entries(requireRecord(root.model_capabilities, "model_capabilities"))) {
+      const limits = requireRecord(value, "model capabilities");
+      if (Object.keys(limits).some((key) => key !== "contextWindow" && key !== "maxOutput") || !Number.isSafeInteger(limits.contextWindow) || !Number.isSafeInteger(limits.maxOutput)
+        || Number(limits.maxOutput) <= 0 || Number(limits.contextWindow) <= Number(limits.maxOutput)) throw new ConfigError("Invalid model capabilities");
+      capabilities[model] = { contextWindow: Number(limits.contextWindow), maxOutput: Number(limits.maxOutput) };
+    }
+  }
+  return { providers, hooks, ...(execution ? { execution } : {}), ...(root.model_capabilities !== undefined ? { model_capabilities: capabilities } : {}) };
 }
 
 function parseSimpleProvider(

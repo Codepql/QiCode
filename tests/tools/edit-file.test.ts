@@ -27,7 +27,9 @@ describe("EditFileTool", () => {
       { workDir },
     );
 
-    expect(result).toEqual({ output: "文件已编辑：demo.txt", isError: false });
+    expect(result.isError).toBe(false);
+    expect(result.output).toContain("文件已编辑：demo.txt");
+    expect(result.metadata?.diff).toContain("+hello new world");
     expect(await readFile(filePath, "utf8")).toBe("hello new world");
   });
 
@@ -63,8 +65,8 @@ describe("EditFileTool", () => {
       { workDir },
     );
 
-    expect(result).toEqual({
-      output: "文件已编辑：demo.txt（替换 2 处）",
+    expect(result).toMatchObject({
+      output: expect.stringContaining("文件已编辑：demo.txt（替换 2 处）"),
       isError: false,
     });
     expect(await readFile(filePath, "utf8")).toBe("new and new");

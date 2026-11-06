@@ -8,13 +8,20 @@ export const MESSAGE_AGGREGATE_LIMIT = 200_000;
 export const OLD_RESULT_SNIP_CHARS = 2_000;
 export const KEEP_RECENT_TURNS = 10;
 export const PREVIEW_CHARS = 2_000;
+export interface ToolOutputBudget { singleResultLimit: number; aggregateLimit: number }
+export function toolOutputBudget(contextWindow: number, maxOutput: number): ToolOutputBudget {
+  const available = Math.max(1024, contextWindow - maxOutput);
+  const singleResultLimit = Math.min(SINGLE_RESULT_LIMIT, Math.max(4000, Math.floor(available * 3.5 * 0.2)));
+  return { singleResultLimit, aggregateLimit: Math.min(MESSAGE_AGGREGATE_LIMIT, Math.max(singleResultLimit * 2, Math.floor(available * 3.5 * 0.4))) };
+}
 
 export function applyBudget(
   messages: readonly ConversationMessage[],
   workDir: string,
   state: ContentReplacementState,
+  limits?: ToolOutputBudget,
 ): ConversationMessage[] {
-  const result = messages.map((message) => budgetMessage(message, workDir, state));
+  const result = messages.map((message) => budgetMessage(message, workDir, state, limits));
   return snipStale(result);
 }
 
@@ -22,12 +29,13 @@ function budgetMessage(
   message: ConversationMessage,
   workDir: string,
   state: ContentReplacementState,
+  limits?: ToolOutputBudget,
 ): ConversationMessage {
   const blocks = message.content.map((block) => {
     if (block.type !== "tool_result") return cloneBlock(block);
     const existing = state.getReplacement(block.toolUseId);
     if (existing !== undefined) return { ...block, content: existing };
-    if (block.content.length <= SINGLE_RESULT_LIMIT) {
+    if (block.content.length <= (limits?.singleResultLimit ?? SINGLE_RESULT_LIMIT)) {
       state.record(block.toolUseId, block.content, block.content);
       return { ...block };
     }
@@ -38,7 +46,7 @@ function budgetMessage(
   });
 
   const results = blocks.filter(isToolResult);
-  if (results.length > 1) applyAggregateBudget(results, workDir, state);
+  if (results.length > 1) applyAggregateBudget(results, workDir, state, limits?.aggregateLimit ?? MESSAGE_AGGREGATE_LIMIT);
   return { role: message.role, content: blocks };
 }
 
@@ -46,12 +54,14 @@ function applyAggregateBudget(
   results: ToolResultBlock[],
   workDir: string,
   state: ContentReplacementState,
+  aggregateLimit: number,
 ): void {
   let total = results.reduce((sum, result) => sum + result.content.length, 0);
-  if (total <= MESSAGE_AGGREGATE_LIMIT) return;
+  if (total <= aggregateLimit) return;
 
   for (const result of [...results].sort((a, b) => b.content.length - a.content.length)) {
-    if (total <= MESSAGE_AGGREGATE_LIMIT || result.content.length <= OLD_RESULT_SNIP_CHARS) break;
+    if (total <= aggregateLimit || result.content.length <= OLD_RESULT_SNIP_CHARS) break;
+    if (result.content.startsWith("<persisted-output>")) continue;
     const original = result.content;
     const path = writeSpill(workDir, result.toolUseId, original);
     const replacement = buildSpillPreview(original, path);

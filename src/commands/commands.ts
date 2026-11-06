@@ -274,6 +274,16 @@ export function createDefaultRegistry(): CommandRegistry {
     handler: () => "skills",
   });
 
+  for (const [name, description] of [
+    ["model", "选择已配置的模型；运行中登记待切换"],
+    ["new", "新建会话，保留原会话和草稿"],
+    ["rename", "命名当前会话：/rename 标题"],
+    ["settings", "偏好设置与按键配置"],
+    ["hotkeys", "查看当前有效快捷键"],
+    ["tasks", "查看任务、日志与单项取消"],
+    ["files", "搜索并引用工作区文件；/files remove <序号> 移除"],
+  ] as const) registry.register({ name, aliases: [], type: "local_ui", description, handler: () => name });
+
   return registry;
 }
 

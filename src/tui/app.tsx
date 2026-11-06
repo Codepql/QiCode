@@ -1,7 +1,16 @@
 import { Box, Text, useApp, useWindowSize } from "ink";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Agent } from "../agent/agent.js";
-import { forceCompact } from "../compact/compact.js";
+import { DEFAULT_EXECUTION, type ExecutionSettings, type ModelCapabilities } from "../agent/execution.js";
+import { isChangeInspection } from "../agent/task-intent.js";
+import { taskApprovalEligible } from "../permissions/task-approval.js";
+import { runSession, SessionPersistenceError } from "../session/run-session.js";
+import { estimateMessages, forceCompact } from "../compact/compact.js";
+import { inspectSession, mergeRestoredContext, sessionCatalog, sessionState, updateSessionState } from "../session/catalog.js";
+import { ChoiceDialog, type Choice } from "./choice-dialog.js";
+import { defaultPreferences, loadPreferences, preferencesPath, providerKey, savePreferences, validatePreferences, type UiPreferences } from "./preferences.js";
+import { modelChoiceDetail, modelHistoryIssue, withoutThinking } from "./model-switch.js";
+import { findReferenceFiles, inspectReference, referenceReminder, type FileReference } from "./file-references.js";
+import { hotkeyHelp, settingsChoices, taskChoices, type PrimaryTask } from "./panel-data.js";
 import { RecoveryState } from "../compact/recovery.js";
 import {
   createDefaultRegistry,
@@ -13,7 +22,7 @@ import { CommandUsageTracker } from "../commands/usage-tracker.js";
 import type { MCPServerConfig, ProviderConfig } from "../config/types.js";
 import { Conversation } from "../conversation/conversation.js";
 import type { ConversationMessage } from "../conversation/types.js";
-import { createProvider, formatProviderError, type Provider } from "../llm/client.js";
+import { createProvider, formatProviderError, redactSecrets, type Provider } from "../llm/client.js";
 import { loadInstructions } from "../memory/instructions.js";
 import { MemoryManager } from "../memory/manager.js";
 import { MemoryExtractor } from "../memory/extractor.js";
@@ -29,10 +38,9 @@ import {
   listSessions,
   loadSession,
   newSessionId,
-  rebuildFromSession,
   saveCompactBoundary,
-  saveMessage,
   cleanExpiredSessions,
+  saveMessage,
 } from "../session/session.js";
 import { MCPManager } from "../mcp/manager.js";
 import { MCPToolWrapper } from "../mcp/tool-wrapper.js";
@@ -99,6 +107,8 @@ export interface AppProps {
   hooks?: readonly unknown[];
   workDir?: string;
   requestTimeoutMs?: number;
+  execution?: Partial<ExecutionSettings>;
+  modelCapabilities?: Record<string, ModelCapabilities>;
   runtimeFactory?: RuntimeFactory;
   mcpManagerFactory?: () => MCPManager;
 }
@@ -115,36 +125,56 @@ function AppContent({
   mcpServers = [],
   hooks,
   workDir = process.cwd(),
-  requestTimeoutMs = 120_000,
+  requestTimeoutMs,
+  execution = {},
+  modelCapabilities = {},
   runtimeFactory = initializeAgentRuntime,
   mcpManagerFactory = createMcpManager,
 }: AppProps) {
   const { exit } = useApp();
   const { columns, rows } = useWindowSize();
+  const executionSettings = { ...DEFAULT_EXECUTION, ...execution, ...(requestTimeoutMs === undefined ? {} : { taskTimeoutMs: requestTimeoutMs }) };
   const tooSmall = columns < 40 || rows < 10;
+  const [loadedUi] = useState(() => loadPreferences(workDir));
+  const [preferences, setPreferences] = useState(loadedUi.preferences);
   const [selectedConfig, setSelectedConfig] = useState<ProviderConfig | undefined>(
-    providers.length === 1 ? providers[0] : undefined,
+    providers.find((provider) => providerKey(provider) === loadedUi.preferences.preferredProvider) ?? (providers.length === 1 ? providers[0] : undefined),
   );
+  const [panel, setPanel] = useState<{ title: string; items: Choice[]; select(id: string): void; cancel?(id: string): void; hint?: string } | null>(null);
+  const [modelSwitchBusy, setModelSwitchBusy] = useState(false);
+  const [pendingModel, setPendingModel] = useState<ProviderConfig>();
+  const switchingRef = useRef(false);
+  const draftRef = useRef("");
+  const [draftValue, setDraftValue] = useState("");
+  const [restoredDraft, setRestoredDraft] = useState({ id: 0, value: "" });
+  const [references, setReferences] = useState<FileReference[]>([]);
+  const [primaryTask, setPrimaryTask] = useState<PrimaryTask>();
+  const primaryTaskRef = useRef(primaryTask); primaryTaskRef.current = primaryTask;
+  const [taskItems, setTaskItems] = useState<Choice[]>([]);
+  const panelRequest = useRef(0);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [forkUiMessages, setForkUiMessages] = useState<ForkUiMessage[]>([]);
   const uiMessages = useMemo(() => mergeForkUiMessages(messages, forkUiMessages), [messages, forkUiMessages]);
   const [streamingText, setStreamingText] = useState("");
+  const steeringRef = useRef<string[]>([]);
   const [activeTools, setActiveTools] = useState<ActiveTool[]>([]);
   const [status, setStatus] = useState<TurnStatus>("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [exitHint, setExitHint] = useState("");
   const [noticeExpanded, setNoticeExpanded] = useState(false);
-  const [mode, setMode] = useState<PermissionMode>("default");
+  const [mode, setMode] = useState<PermissionMode>(loadedUi.preferences.defaultMode);
   const [permissionRequest, setPermissionRequest] = useState<{
     id: number;
     toolName: string;
     argsSummary: string;
     reason: string;
+    allowTask: boolean;
   } | null>(null);
   const permissionResolveRef = useRef<((action: PermissionAction) => void) | null>(null);
   const permissionSequenceRef = useRef(0);
   const [inputTokens, setInputTokens] = useState<number>();
   const [outputTokens, setOutputTokens] = useState<number>();
+  const [contextOverhead, setContextOverhead] = useState(0);
   const [iteration, setIteration] = useState<number>();
   const [startedAt, setStartedAt] = useState(Date.now());
   const conversationRef = useRef(new Conversation());
@@ -164,6 +194,8 @@ function AppContent({
   const mcpManagerFactoryRef = useRef(mcpManagerFactory);
   mcpManagerFactoryRef.current = mcpManagerFactory;
   const runtimeRef = useRef<Promise<AgentRuntime> | undefined>(undefined);
+  const preparedRuntimeRef = useRef<{ config: ProviderConfig; runtime: Promise<AgentRuntime> } | undefined>(undefined);
+  const modelRollbackRef = useRef<{ config: ProviderConfig; preferences: UiPreferences } | undefined>(undefined);
   const subAgentRunnerRef = useRef<SubAgentRunner | undefined>(undefined);
   const taskManagerRef = useRef<TaskManager | undefined>(undefined);
   const teamManagerRef = useRef<TeamManager | undefined>(undefined);
@@ -256,6 +288,22 @@ function AppContent({
   }
   const busy = status === "waiting" || status === "streaming";
 
+  useEffect(() => { if (loadedUi.error) setCompactNotice(`偏好读取失败，使用默认值：${loadedUi.error}`); }, []);
+  useEffect(() => {
+    const id = sessionIdRef.current;
+    const timer = setTimeout(() => {
+      try {
+        if (!draftValue && !restoredDraft.id && !sessionState(workDir, id).draft) return;
+        updateSessionState(workDir, id, { draft: draftValue });
+      }
+      catch (error) { setCompactNotice(`草稿保存失败：${error instanceof Error ? error.message : String(error)}`); }
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [draftValue, restoredDraft.id, workDir]);
+  useEffect(() => {
+    if (!busy && pendingModel && !modelSwitchBusy) { setPendingModel(undefined); void chooseModel(pendingModel); }
+  }, [busy, pendingModel, modelSwitchBusy]);
+
   useEffect(() => {
     injectDurableContext(conversationRef.current, workDir);
     FileHistory.cleanupEmptySessionDirs(workDir);
@@ -342,15 +390,32 @@ function AppContent({
 
   useEffect(() => {
     runtimeRef.current = selectedConfig
-      ? startRuntime(runtimeFactory, selectedConfig, workDir, buildSkillSection(skillRuntimeRef.current!.catalog))
+      ? preparedRuntimeRef.current?.config === selectedConfig ? preparedRuntimeRef.current.runtime : startRuntime(runtimeFactory, selectedConfig, workDir, buildSkillSection(skillRuntimeRef.current!.catalog))
       : undefined;
+    preparedRuntimeRef.current = undefined;
+    let current = true;
+    void runtimeRef.current?.then((runtime) => {
+      if (current) setContextOverhead(Math.ceil((runtime.systemPrompt.length + JSON.stringify(registryRef.current!.listTools().map((tool) => tool.schema())).length) / 3.5));
+    }).catch(() => {});
     void taskManagerRef.current?.cancelAll();
     taskManagerRef.current = undefined;
     subAgentRunnerRef.current = undefined;
+    return () => { current = false; };
   }, [runtimeFactory, selectedConfig, workDir]);
 
   useRoutedInput(tooSmall ? 1000 : 0, (input, key) => {
     if (tooSmall && !(key.ctrl && input === "c")) return true;
+    if (key.meta && !panel && !permissionRequest && !teamsDialogOpen) {
+      const action = Object.entries(preferences.bindings).find(([, chord]) => chord === `alt+${input.toLowerCase()}`)?.[0];
+      if (action) {
+        if (action === "models") openModels();
+        else if (action === "tasks") openTasks();
+        else if (action === "settings") openSettings();
+        else if (!busy && !modelSwitchBusy) openSessions();
+        else setCompactNotice("请等待当前任务结束后切换会话。");
+        return true;
+      }
+    }
     if (key.tab && key.shift) {
       const cycle: PermissionMode[] = ["default", "acceptEdits", "plan", "bypassPermissions"];
       setMode((previous) => cycle[(cycle.indexOf(previous) + 1) % cycle.length]!);
@@ -399,6 +464,14 @@ function AppContent({
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!panel || panel.title !== "任务面板") return;
+      setTaskItems(taskChoices(primaryTaskRef.current, taskManagerRef.current?.list() ?? [], teamManagerRef.current?.getAllTeammateStates() ?? [], workDir));
+    }, 500);
+    return () => clearInterval(timer);
+  }, [panel?.title, workDir]);
+
   if (!selectedConfig) {
     return (
       <Box flexDirection="column">
@@ -444,6 +517,11 @@ function AppContent({
       handlePermissionCommand(parsed.args);
       return true;
     }
+    if (command.name === "session") {
+      const state = sessionState(workDir, sessionIdRef.current);
+      setCompactNotice(`当前会话：${sessionIdRef.current}\n标题：${state.title ?? "未命名"}\n项目：${workDir}\n/resume 选择 · /resume latest 最近 · /rename 标题 · /new 新建`);
+      return true;
+    }
 
     const context = {
       workDir,
@@ -485,6 +563,118 @@ function AppContent({
     return true;
   }
 
+  function storePreferences(next: UiPreferences): boolean {
+    try { savePreferences(workDir, next); setPreferences(next); return true; }
+    catch (error) { setCompactNotice(`偏好保存失败，未修改当前设置：${error instanceof Error ? error.message : String(error)}`); return false; }
+  }
+
+  function openSettings(): void {
+    setPanel({ title: "偏好设置", items: settingsChoices(preferences, preferencesPath(workDir)), select: (id) => {
+      if (id === "reset") {
+        setPanel({ title: "恢复默认偏好", items: [{ id: "reset", label: "确认恢复默认（不修改 Provider 配置）" }], select: () => { if (storePreferences(defaultPreferences())) { setPanel(null); setCompactNotice("已恢复默认偏好。"); } } });
+        return;
+      }
+      const next = id === "defaultMode" ? { ...preferences, defaultMode: (["default", "acceptEdits", "plan"] as const)[(["default", "acceptEdits", "plan"] as const).indexOf(preferences.defaultMode) + 1] ?? "default" as const }
+        : { ...preferences, [id]: !preferences[id as "compact" | "toolPreview" | "highContrast"] };
+      if (storePreferences(next)) { setPanel(null); setCompactNotice(`设置已保存：${preferencesPath(workDir)}；/settings 可继续调整。`); }
+    } });
+  }
+
+  function openModels(): void {
+    setPanel({ title: "选择模型", items: providers.map((provider, index) => ({ id: String(index), label: `${provider === selectedConfig ? "● " : ""}${provider.name} · ${provider.model} · ${provider.protocol}`, detail: modelChoiceDetail(provider, modelCapabilities[provider.model]) })), select: (id) => {
+      const target = providers[Number(id)]; if (!target) return;
+      setPanel(null);
+      if (busy) { setPendingModel(target); setCompactNotice(`已登记模型 ${target.model}，当前任务结束后切换；再次选择可替换。`); }
+      else void chooseModel(target);
+    } });
+  }
+
+  async function chooseModel(target: ProviderConfig, convert = false): Promise<void> {
+    if (switchingRef.current || !selectedConfig) return;
+    if (target === selectedConfig) { setCompactNotice("当前已使用该模型。"); return; }
+    if (hasBackgroundWork()) {
+      setCompactNotice("后台任务或团队成员仍活跃，请先在 /tasks 结束后再切换模型。"); return;
+    }
+    const issue = modelHistoryIssue(conversationRef.current.getMessages(), selectedConfig, target);
+    if (issue && !convert) {
+      const canConvert = issue.startsWith("历史包含");
+      setPanel({ title: "模型历史兼容性", items: canConvert ? [{ id: "convert", label: "转换历史并切换（移除隐藏思考块）", detail: issue }] : [{ id: "cancel", label: "返回原模型", detail: issue }], select: (id) => { setPanel(null); if (id === "convert") void chooseModel(target, true); } });
+      return;
+    }
+    switchingRef.current = true; setModelSwitchBusy(true);
+    try {
+      const prepared = await startRuntime(runtimeFactory, target, workDir, buildSkillSection(skillRuntimeRef.current!.catalog));
+      if (convert) conversationRef.current.restoreMessages(withoutThinking(conversationRef.current.getMessages()));
+      runtimeRef.current = Promise.resolve(prepared);
+      preparedRuntimeRef.current = { config: target, runtime: runtimeRef.current };
+      modelRollbackRef.current = { config: selectedConfig, preferences };
+      memoryExtractorRef.current = null;
+      setSelectedConfig(target); setMessages(conversationRef.current.getMessages()); setPanel(null);
+      const stored = storePreferences({ ...preferences, preferredProvider: providerKey(target) });
+      setCompactNotice(`已切换 ${target.name} / ${target.model}，保留当前对话。端点能力将在下一实际请求时验证。${stored ? "" : "首选模型保存失败，下次启动不保证沿用。"}`);
+    } catch (error) { setCompactNotice(`模型切换失败，保留原配置：${formatProviderError(error, providers.map((provider) => provider.api_key))}`); }
+    finally { switchingRef.current = false; setModelSwitchBusy(false); }
+  }
+
+  function saveCurrentDraft(): void { updateSessionState(workDir, sessionIdRef.current, { draft: draftRef.current + (references.length ? `\n${references.map((file) => `@${JSON.stringify(file.path)}`).join(" ")}` : "") }); }
+  function persistConversation(): void {
+    const content = JSON.stringify({ version: 2, start: 0, messages: conversationRef.current.getMessages() }, (_key, value: unknown) => typeof value === "string" ? redactSecrets(value, providers.map((provider) => provider.api_key)) : value);
+    saveMessage(workDir, sessionIdRef.current, { role: "system", type: "messages_v2", content, timestamp: new Date().toISOString() });
+  }
+  function hasBackgroundWork(): boolean {
+    return !!taskManagerRef.current?.list().some((task) => task.status === "running" || task.status === "queued") || !!teamManagerRef.current?.getAllTeammateStates().some((member) => member.status === "running" || member.status === "idle");
+  }
+  function rollbackUnprovenModel(): void {
+    const previous = modelRollbackRef.current;
+    if (!previous) return;
+    modelRollbackRef.current = undefined;
+    setSelectedConfig(previous.config); memoryExtractorRef.current = null;
+    storePreferences(previous.preferences);
+    setCompactNotice(`新模型首次请求失败，已回到 ${previous.config.model}。当前对话保留，请核对错误后重试。`);
+  }
+  function restoreDraft(value: string): void { draftRef.current = value; setDraftValue(value); setRestoredDraft((previous) => ({ id: previous.id + 1, value })); }
+
+  function openSessions(): void {
+    if (busy || modelSwitchBusy) { setCompactNotice("请等待当前任务结束后恢复会话。"); return; }
+    try {
+      const sessions = sessionCatalog(workDir);
+      setPanel({ title: "会话选择", items: sessions.map((session) => ({ id: session.id, label: `${session.title} · ${session.modTime.toLocaleString()} · ${session.messageCount} 条${session.warning ? " ⚠" : ""}`,
+        search: `${session.id} ${session.summary} ${session.project}`, detail: `${session.title}\nID：${session.id}\n项目：${session.project}\n最近：${session.modTime.toLocaleString()}\n消息：${session.messageCount}\n${session.warning ?? ""}\n${session.summary}` })), select: (id) => resumeSession(id) });
+    } catch (error) { setCompactNotice(`会话列表读取失败：${error instanceof Error ? error.message : String(error)}`); }
+  }
+
+  function openTasks(): void {
+    setTaskItems(taskChoices(primaryTask, taskManagerRef.current?.list() ?? [], teammateStates, workDir));
+    setPanel({ title: "任务面板", items: [], hint: "输入搜索 · Tab/Enter 详情 · Ctrl+X 取消所选 · Esc 返回", select: () => {}, cancel: (id) => {
+      if (id === "primary") { abortRef.current?.abort(); setCompactNotice("正在取消主任务，保留已生效修改。"); }
+      else if (id.startsWith("background:")) { taskManagerRef.current?.cancel(id.slice("background:".length)); }
+      else {
+        const member = teamManagerRef.current?.list().flatMap((team) => team.listMembers().map((member) => ({ team: team.name, member }))).find((entry) => `member:${entry.team}:${entry.member.name}` === id);
+        void member?.member.cancel?.();
+      }
+    } });
+  }
+
+  async function openFiles(query = "", replacement?: { start: number; end: number }): Promise<void> {
+    const request = ++panelRequest.current;
+    setPanel({ title: "文件引用", items: [], select: () => {} });
+    try {
+      const files = await findReferenceFiles(workDir, query);
+      if (request !== panelRequest.current) return;
+      setPanel({ title: "文件引用", hint: "输入筛选 · 最多显示 200 项 · Enter 预览文件 · Esc 返回", items: files.map((path) => ({ id: path, label: path, detail: "Enter 查看受工作区约束的内容预览，再确认引用；发送时只加入路径。" })), select: (path) => {
+        void inspectReference(workDir, path).then((file) => {
+          if (request !== panelRequest.current) return;
+          setPanel({ title: "确认文件引用", items: [{ id: "add", label: `${file.path} · ${file.size} 字节 · Enter 引用`, detail: file.preview }], select: () => {
+            if (references.length >= 20 && !references.some((item) => item.path === file.path)) { setCompactNotice("最多引用 20 个文件，请先移除已有引用。"); return; }
+            setReferences((previous) => previous.some((item) => item.path === file.path) ? previous : [...previous, file]);
+            if (replacement) restoreDraft(draftRef.current.slice(0, replacement.start) + `@${JSON.stringify(file.path)}` + draftRef.current.slice(replacement.end));
+            setPanel(null); setCompactNotice(`已引用 ${file.path}，正文按需读取；/files remove <序号> 移除。`);
+          } });
+        }).catch((error: unknown) => setCompactNotice(`文件引用失败：${error instanceof Error ? error.message : String(error)}`));
+      } });
+    } catch (error) { if (request === panelRequest.current) { setPanel(null); setCompactNotice(`文件搜索失败：${error instanceof Error ? error.message : String(error)}`); } }
+  }
+
   async function runForkSkill(
     name: string,
     args: string,
@@ -508,7 +698,7 @@ function AppContent({
     const timeout = setTimeout(() => {
       timedOut = true;
       controller.abort();
-    }, requestTimeoutMs);
+    }, requestTimeoutMs ?? executionSettings.taskTimeoutMs);
     try {
       if (fileHistoryRef.current === null) throw new Error("File history is unavailable; restore the history index or start a new session before editing.");
       fileHistoryRef.current.beginTurn(checkpointMessageIndex, `/skill ${name}`);
@@ -533,7 +723,7 @@ function AppContent({
             checker: new PermissionChecker(workDir, mode),
             ...(allowedTools === undefined ? {} : { allowedTools }),
             abortSignal: controller.signal,
-            contextWindow: contextWindowFor(config),
+            contextWindow: contextWindowFor(config, modelCapabilities),
             maxOutput: 8_192,
             ...(fileHistoryRef.current === null ? {} : { fileHistory: fileHistoryRef.current }),
             onPermissionRequest: (toolName, toolArgs, decision) =>
@@ -609,6 +799,7 @@ function AppContent({
         toolName,
         argsSummary: [args.command, args.file_path, args.pattern, args.path].find((value): value is string => typeof value === "string") ?? JSON.stringify(args, null, 2),
         reason: decision.reason,
+        allowTask: taskApprovalEligible(toolName, args, mode, decision),
       });
     });
   }
@@ -653,7 +844,35 @@ function AppContent({
 
     switch (action) {
       case "clear":
+      case "new":
         clearConversation();
+        return;
+      case "rename":
+        try { updateSessionState(workDir, sessionIdRef.current, { title: args.trim() }); setCompactNotice(`会话已命名：${args.trim()}`); }
+        catch (error) { setCompactNotice(`命名失败：${error instanceof Error ? error.message : String(error)}`); }
+        return;
+      case "model":
+        if (args === "cancel") { setPendingModel(undefined); setCompactNotice("已撤销待切换模型。"); }
+        else openModels();
+        return;
+      case "tasks": openTasks(); return;
+      case "hotkeys": setCompactNotice(hotkeyHelp(preferences)); return;
+      case "files":
+        if (args.startsWith("remove ")) {
+          const index = Number(args.slice(7)) - 1;
+          if (!Number.isInteger(index) || index < 0 || index >= references.length) setCompactNotice("使用 /files remove <序号>，序号从 1 开始。");
+          else setReferences((previous) => previous.filter((_, i) => i !== index));
+        } else await openFiles(args);
+        return;
+      case "settings":
+        if (args.startsWith("bind ")) {
+          const parts = args.split(/\s+/);
+          try {
+            if (parts.length !== 3) throw new Error("格式：/settings bind <动作> <alt+键>");
+            const next = validatePreferences({ ...preferences, bindings: { ...preferences.bindings, [parts[1]!]: parts[2]!.toLowerCase() } });
+            if (storePreferences(next)) setCompactNotice("按键已保存，/hotkeys 查看生效配置。");
+          } catch (error) { setCompactNotice(`按键未修改：${error instanceof Error ? error.message : String(error)}`); }
+        } else openSettings();
         return;
       case "compact":
         await compactConversation(config);
@@ -679,6 +898,8 @@ function AppContent({
   }
 
   function clearConversation(): void {
+    if (busy || modelSwitchBusy || hasBackgroundWork()) { setCompactNotice("请先结束当前任务和后台工作，再新建会话。"); return; }
+    try { saveCurrentDraft(); } catch (error) { setCompactNotice(`草稿保存失败，未新建会话：${error instanceof Error ? error.message : String(error)}`); return; }
     const conversation = new Conversation();
     injectDurableContext(conversation, workDir);
     conversationRef.current = conversation;
@@ -699,6 +920,8 @@ function AppContent({
     setInputTokens(undefined);
     setOutputTokens(undefined);
     setIteration(undefined);
+    setReferences([]); steeringRef.current = []; restoreDraft(""); setPrimaryTask(undefined);
+    setStatus("idle"); setPanel(null);
   }
 
   function enterPlanMode(): void {
@@ -724,6 +947,8 @@ function AppContent({
 
   async function compactConversation(config: ProviderConfig): Promise<void> {
     setCompactNotice("");
+    const controller = new AbortController(); abortRef.current = controller; setStatus("waiting");
+    const original = conversationRef.current.getMessages();
     try {
       const runtimePromise = runtimeRef.current
         ?? startRuntime(runtimeFactory, config, workDir, buildSkillSection(skillRuntimeRef.current!.catalog));
@@ -734,6 +959,7 @@ function AppContent({
         runtime.provider,
         recoveryStateRef.current,
         registryRef.current!.listTools().map((tool) => tool.name),
+        controller.signal,
       );
       if (result.boundary !== undefined) {
         saveCompactBoundary(workDir, sessionIdRef.current, result.boundary);
@@ -741,14 +967,22 @@ function AppContent({
       setMessages(conversationRef.current.getMessages());
       setCompactNotice(result.message);
     } catch (error) {
+      conversationRef.current.restoreMessages(original); setMessages(conversationRef.current.getMessages());
       const message = error instanceof Error ? error.message : String(error);
       setCompactNotice(`Compaction failed: ${message}`);
-    }
+    } finally { abortRef.current = undefined; setStatus("idle"); }
   }
 
   async function submit(rawText: string, bypassSlash = false): Promise<void> {
     const config = selectedConfig;
-    if (busy || !config) return;
+    if (!config) return;
+    if (switchingRef.current) { setCompactNotice("模型切换中，请稍后发送。"); return; }
+    if (!bypassSlash && busy && /^\/(?:model|tasks|settings|hotkeys|files)(?:\s|$)/i.test(rawText)) { await handleSlashCommand(rawText, config); return; }
+    if (busy) {
+      steeringRef.current.push(rawText + referenceReminder(references)); setReferences([]);
+      setCompactNotice(`已排入 ${steeringRef.current.length} 条当前任务补充，下一安全边界生效；Alt+Q 可取回。`);
+      return;
+    }
     if (!bypassSlash && await handleSlashCommand(rawText, config)) return;
 
     const checkpointMessageIndex = conversationRef.current.getMessages().length;
@@ -760,25 +994,19 @@ function AppContent({
       setStatus("failed");
       return;
     }
-    conversationRef.current.addUserMessage(rawText);
-    persistSessionMessage("user", rawText);
+    conversationRef.current.addUserMessage(rawText + referenceReminder(references));
+    setReferences([]);
     setMessages(conversationRef.current.getMessages());
     setStreamingText("");
     setActiveTools([]);
     setErrorMessage("");
-    setInputTokens(undefined);
-    setOutputTokens(undefined);
     setIteration(undefined);
     setStatus("waiting");
     setStartedAt(Date.now());
+    setPrimaryTask({ id: String(Date.now()), title: rawText.slice(0, 120), status: "运行中", action: "等待模型", detail: "", started: Date.now() });
 
     const controller = new AbortController();
     abortRef.current = controller;
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, requestTimeoutMs);
     let agentFailed = false;
     try {
       const runtimePromise = runtimeRef.current
@@ -795,7 +1023,7 @@ function AppContent({
         registry,
         systemPrompt: runtime.systemPrompt,
         workDir,
-        contextWindow: contextWindowFor(config),
+        contextWindow: contextWindowFor(config, modelCapabilities),
         onPermissionRequest: (toolName, args, decision) =>
           requestToolPermission(controller, toolName, args, decision),
       });
@@ -842,7 +1070,11 @@ function AppContent({
         runner: () => subAgentRunnerRef.current ?? subAgentRunner,
         taskManager: () => taskManagerRef.current!,
       }));
-      const agent = new Agent({
+      const events = runSession({
+        sessionId: sessionIdRef.current,
+        execution: executionSettings,
+        trackDelivery: true,
+        takeSteering: () => steeringRef.current.splice(0),
         provider: runtime.provider,
         registry,
         conversation: conversationRef.current,
@@ -851,8 +1083,8 @@ function AppContent({
         abortSignal: controller.signal,
         checker: new PermissionChecker(workDir, mode),
         recoveryState: recoveryStateRef.current,
-        contextWindow: contextWindowFor(config),
-        maxOutput: 8_192,
+        contextWindow: contextWindowFor(config, modelCapabilities),
+        maxOutput: modelCapabilities[config.model]?.maxOutput ?? 8_192,
         activeSkills: skillRuntimeRef.current!.activeSkills,
         toolFilter: (toolName) =>
           (skillRuntimeRef.current!.toolFilter()?.(toolName) ?? true)
@@ -873,7 +1105,7 @@ function AppContent({
           requestToolPermission(controller, toolName, args, decision),
       });
 
-      for await (const event of agent.run()) {
+      for await (const event of events) {
         if (event.type === "iteration_start") {
           setIteration(event.iteration);
           setStatus("streaming");
@@ -882,21 +1114,38 @@ function AppContent({
             saveCompactBoundary(workDir, sessionIdRef.current, event.boundary);
           }
           setMessages(conversationRef.current.getMessages());
-          setCompactNotice(event.message);
+          setCompactNotice(`${event.message}\n当前上下文估算：${estimateMessages(conversationRef.current.getMessages())} tokens；较早历史摘要化，近期消息保留。`);
         } else if (event.type === "stream_text") {
           setStreamingText((current) => current + event.text);
           setStatus("streaming");
         } else if (event.type === "thinking_text") {
           setStatus("streaming");
         } else if (event.type === "tool_use") {
-          setStreamingText("");
           setActiveTools((current) => [...current, {
             toolId: event.toolId,
             toolName: event.toolName,
             args: event.args,
           }]);
           setStatus("streaming");
+        } else if (event.type === "tool_start") {
+          modelRollbackRef.current = undefined;
+          setPrimaryTask((previous) => previous ? { ...previous, action: event.toolName, liveOutput: "" } : previous);
+          setMessages(conversationRef.current.getMessages());
+          setStreamingText("");
+          setActiveTools((current) => current.map((tool) => tool.toolId === event.toolId ? { ...tool, running: true } : tool));
+        } else if (event.type === "tool_update") {
+          setPrimaryTask((previous) => previous ? { ...previous, liveOutput: event.output.slice(-4000) } : previous);
+          setActiveTools((current) => current.map((tool) => tool.toolId === event.toolId ? { ...tool, output: event.output } : tool));
+        } else if (event.type === "stream_reset") {
+          setStreamingText(""); setActiveTools([]);
+        } else if (event.type === "retry") {
+          setCompactNotice(`模型请求重试 ${event.attempt}，等待 ${(event.delayMs / 1000).toFixed(1)} 秒。`);
+        } else if (event.type === "delivery") {
+          setPrimaryTask((previous) => previous ? { ...previous, status: event.report.status, action: event.report.message } : previous);
+          setCompactNotice(event.report.message);
+          if (event.report.status === "failed" || event.report.status === "blocked") agentFailed = true;
         } else if (event.type === "tool_result") {
+          setPrimaryTask((previous) => previous ? { ...previous, liveOutput: "", action: `${event.toolName} ${event.isError ? "失败" : "结束"}`, detail: `${previous.detail}\n${event.toolName} (${event.elapsed.toFixed(2)}s)\n${event.output}`.slice(-24_000) } : previous);
           setActiveTools((current) => current.filter((tool) => tool.toolId !== event.toolId));
           setMessages(conversationRef.current.getMessages());
         } else if (event.type === "turn_complete") {
@@ -904,11 +1153,10 @@ function AppContent({
           setStreamingText("");
         } else if (event.type === "loop_complete") {
           if (!agentFailed && !controller.signal.aborted) {
-            persistFinalAssistantMessage();
             if (fileHistoryRef.current?.hasPendingChanges()) {
               fileHistoryRef.current.makeSnapshot(checkpointMessageIndex, rawText);
             }
-            triggerMemoryExtraction(runtime.provider);
+            if (!isChangeInspection(rawText)) triggerMemoryExtraction(runtime.provider);
           }
         } else if (event.type === "usage") {
           if (event.inputTokens !== undefined) {
@@ -924,43 +1172,27 @@ function AppContent({
         }
       }
       setMessages(conversationRef.current.getMessages());
+      if (agentFailed && !controller.signal.aborted) rollbackUnprovenModel();
+      else if (!controller.signal.aborted) modelRollbackRef.current = undefined;
       setStatus(controller.signal.aborted || !agentFailed ? "idle" : "failed");
+      setPrimaryTask((previous) => previous ? { ...previous, status: controller.signal.aborted ? "已取消" : agentFailed ? "失败" : previous.status === "运行中" ? "执行结束" : previous.status } : previous);
     } catch (error) {
+      if (!controller.signal.aborted) rollbackUnprovenModel();
       setErrorMessage(
-        timedOut
-          ? "Request timed out. You can continue the conversation."
-          : formatProviderError(error, [config.api_key]),
+        error instanceof SessionPersistenceError ? error.message : formatProviderError(error, [config.api_key]),
       );
       setStatus("failed");
+      setPrimaryTask((previous) => previous ? { ...previous, status: "失败", action: "请求或保存失败" } : previous);
     } finally {
-      clearTimeout(timeout);
       abortRef.current = undefined;
       setStreamingText("");
       setActiveTools([]);
       setIteration(undefined);
       setExitHint("");
+      if (steeringRef.current.length) setCompactNotice(`保留 ${steeringRef.current.length} 条未消费补充；Alt+Q 可取回编辑，未自动继续任务。`);
     }
   }
 
-  function persistSessionMessage(role: "user" | "assistant", content: string): void {
-    try {
-      saveMessage(workDir, sessionIdRef.current, {
-        role,
-        content,
-        timestamp: new Date().toISOString(),
-      });
-    } catch {
-      // Session persistence is optional; an I/O failure must not interrupt a turn.
-    }
-  }
-
-  function persistFinalAssistantMessage(): void {
-    const lastMessage = conversationRef.current.getMessages().at(-1);
-    if (lastMessage?.role !== "assistant") return;
-
-    const content = Conversation.visibleText(lastMessage);
-    if (content.trim() !== "") persistSessionMessage("assistant", content);
-  }
 
   function triggerMemoryExtraction(provider: Provider): void {
     const conversation = conversationRef.current.getMessages();
@@ -1035,6 +1267,7 @@ function AppContent({
   }
 
   function handleRewind(snapshotIndex: number | undefined): void {
+    if (hasBackgroundWork()) { setCompactNotice("请先结束后台任务，再预览或恢复检查点。"); return; }
     const history = fileHistoryRef.current;
     if (history === null || !history.hasSnapshots()) {
       setCompactNotice("No checkpoints to rewind to.");
@@ -1042,10 +1275,7 @@ function AppContent({
     }
     const snapshots = history.getSnapshots();
     if (snapshotIndex === undefined) {
-      setCompactNotice([
-        "Checkpoints (use /rewind <index> to restore):",
-        ...snapshots.map((snapshot, index) => `  ${index}: ${snapshot.label}`),
-      ].join("\n"));
+      setPanel({ title: "检查点选择", items: snapshots.map((snapshot, index) => ({ id: String(index), label: `${index}: ${snapshot.label} · ${snapshot.createdAt || "未结束回合"}`, detail: `${snapshot.label}\n时间：${snapshot.createdAt || "恢复的未完成回合"}\n本回合文件：${Object.keys(snapshot.backups).join("\n") || "无"}` })), select: (id) => handleRewind(Number(id)) });
       return;
     }
     if (!Number.isInteger(snapshotIndex) || snapshotIndex < 0 || snapshotIndex >= snapshots.length) {
@@ -1054,27 +1284,41 @@ function AppContent({
     }
     const snapshot = snapshots[snapshotIndex]!;
     try {
-      const changed = history.rewind(snapshotIndex);
-      conversationRef.current.truncateTo(snapshot.messageIndex);
-      setMessages(conversationRef.current.getMessages());
-      setCompactNotice(`Rewound to checkpoint ${snapshotIndex}. Restored ${changed.length} file(s).`);
+      const preview = history.previewRewind(snapshotIndex);
+      const warning = `恢复范围：${preview.files.join("\n") || "无已追踪文件"}\n冲突：${preview.conflicts.join("\n") || "未发现"}\n仅覆盖已追踪的编辑工具修改，不能撤销 Shell 或外部系统副作用。确认执行时会再次校验。`;
+      setPanel({ title: "确认检查点恢复", items: [
+        ...(preview.conflicts.length ? [] : [{ id: "files", label: "只恢复已追踪文件，保留对话", detail: warning }, { id: "both", label: "恢复文件，并回退对话到该回合前", detail: warning }]),
+        { id: "cancel", label: preview.conflicts.length ? "存在冲突，返回并先核对文件" : "取消恢复", detail: warning },
+      ], select: (id) => {
+        if (id === "cancel") { setPanel(null); return; }
+        try {
+          const changed = history.rewind(snapshotIndex);
+          if (id === "both") conversationRef.current.truncateTo(snapshot.messageIndex);
+          else conversationRef.current.addSystemReminder("用户已恢复检查点文件并保留历史对话。旧工具结果和验证不证明当前文件状态，请重新读取后继续。");
+          setMessages(conversationRef.current.getMessages());
+          try { persistConversation(); } catch { setErrorMessage("文件已恢复，但回退后的对话保存失败；重启恢复时请核对磁盘。"); }
+          recoveryStateRef.current = new RecoveryState(); memoryCursorRef.current = 0; setPrimaryTask(undefined);
+          setPanel(null); setCompactNotice(`已恢复 ${changed.length} 个已追踪文件；${id === "both" ? "对话已回退" : "对话保留"}。外部命令副作用未撤销。`);
+        } catch (error) { setCompactNotice(error instanceof Error ? error.message : "恢复失败，检查点保留。"); }
+      } });
     } catch (error) {
       setCompactNotice(error instanceof Error ? error.message : "Rewind failed; checkpoints were preserved.");
     }
   }
 
   function resumeSession(sessionId: string | undefined): void {
+    if (busy || modelSwitchBusy || hasBackgroundWork()) { setCompactNotice("请先结束当前任务和后台工作，再恢复会话。"); return; }
     if (sessionId === undefined || sessionId === "") {
-      const sessions = listSessions(workDir).slice(0, 10);
-      setCompactNotice(sessions.length === 0
-        ? "No sessions found."
-        : `Sessions (use /resume <id> to restore):\n${sessions.map((session) => (
-          `  ${sessions.indexOf(session)}: ${session.id} (${session.messageCount} messages) - ${session.firstMessage}`
-        )).join("\n")}`);
+      openSessions();
       return;
     }
 
     let targetSessionId = sessionId;
+    if (sessionId === "latest") {
+      const latest = listSessions(workDir).find((session) => session.id !== sessionIdRef.current);
+      if (!latest) { setCompactNotice("没有其他可恢复会话。"); return; }
+      targetSessionId = latest.id;
+    }
     if (/^\d+$/.test(sessionId)) {
       const index = Number(sessionId);
       const session = listSessions(workDir).at(index);
@@ -1092,7 +1336,9 @@ function AppContent({
         return;
       }
 
-      const restored = rebuildFromSession(saved);
+      const inspected = inspectSession(workDir, targetSessionId);
+      const restored = inspected.messages;
+      const targetDraft = sessionState(workDir, targetSessionId).draft ?? "";
       const conversation = new Conversation();
       injectDurableContext(conversation, workDir);
       const durableContext = conversation.getMessages();
@@ -1103,8 +1349,10 @@ function AppContent({
           text: `<system-reminder>\n${instruction}\n</system-reminder>`,
         }],
       }));
-      conversation.restoreMessages(restored, [...durableContext, ...mcpReminders]);
+      if (inspected.structured) conversation.restoreMessages(mergeRestoredContext(restored, [...durableContext, ...mcpReminders]));
+      else conversation.restoreMessages(restored, [...durableContext, ...mcpReminders]);
 
+      saveCurrentDraft();
       conversationRef.current = conversation;
       recoveryStateRef.current = new RecoveryState();
       sessionIdRef.current = targetSessionId;
@@ -1120,7 +1368,9 @@ function AppContent({
       setStreamingText("");
       setActiveTools([]);
       setErrorMessage("");
-      setCompactNotice(`Resumed session ${targetSessionId} (${restored.length} messages).${historyWarning}`);
+      setReferences([]); steeringRef.current = []; restoreDraft(targetDraft); setPanel(null); setPrimaryTask(undefined);
+      setInputTokens(undefined); setOutputTokens(undefined); setStatus("idle");
+      setCompactNotice(`Resumed session ${targetSessionId} (${restored.length} messages).${historyWarning}${inspected.warning ? `\n${inspected.warning}` : ""}`);
     } catch {
       setCompactNotice(`Session "${sessionId}" could not be restored.`);
     }
@@ -1134,19 +1384,21 @@ function AppContent({
       </Box>}
       <Box flexDirection="column" {...(tooSmall ? { height: 0, overflow: "hidden" as const } : {})}>
         <TerminalFrame columns={columns} rows={rows}
-          header={permissionRequest !== null || teamsDialogOpen || noticeExpanded ? null : <Header version={VERSION} model={selectedConfig.model} workDir={workDir} columns={columns} rows={rows} />}
+          header={permissionRequest !== null || teamsDialogOpen || noticeExpanded || panel ? null : <Header version={VERSION} model={selectedConfig.model} workDir={workDir} columns={columns} rows={rows} />}
           footer={<>
-            {!permissionRequest && !teamsDialogOpen && busy && rows >= 16 && <Activity active={busy} label={status === "waiting" ? "等待模型" : iteration === undefined ? "接收回复" : `执行第 ${iteration} 轮`} startedAt={startedAt} />}
-            <NoticePanel notices={[errorMessage && `错误：${errorMessage}`, exitHint, compactNotice, hookNotice && `Hook configuration: ${hookNotice}`, agentNotice && `Agent configuration: ${agentNotice}`, mcpNotice]} columns={columns} maxHeight={Math.max(2, Math.floor(rows / 3))} active={!tooSmall && !permissionRequest && !teamsDialogOpen} onExpandedChange={setNoticeExpanded} />
+            {!permissionRequest && !teamsDialogOpen && !panel && busy && rows >= 16 && <Activity active={busy} label={status === "waiting" ? "等待模型" : iteration === undefined ? "接收回复" : `执行第 ${iteration} 轮`} startedAt={startedAt} />}
+            <NoticePanel notices={[errorMessage && `错误：${errorMessage}`, exitHint, pendingModel ? `待切换模型：${pendingModel.model} · /model cancel 撤销` : "", modelSwitchBusy ? "正在初始化模型…" : "", compactNotice, hookNotice && `Hook configuration: ${hookNotice}`, agentNotice && `Agent configuration: ${agentNotice}`, mcpNotice]} columns={columns} maxHeight={Math.max(2, Math.floor(rows / 3))} active={!tooSmall && !permissionRequest && !teamsDialogOpen && !panel} onExpandedChange={setNoticeExpanded} />
             {permissionRequest && (
               <PermissionDialog
                 key={permissionRequest.id}
                 toolName={permissionRequest.toolName}
                 argsSummary={permissionRequest.argsSummary}
                 reason={permissionRequest.reason}
+                allowTask={permissionRequest.allowTask}
                 columns={columns}
                 maxHeight={Math.max(6, rows - 4)}
                 onComplete={(action) => {
+                  if (action === "allowTask") setCompactNotice("本次任务已授权编辑和普通命令；任务结束失效，Esc 可随时取消。");
                   permissionResolveRef.current?.(action);
                   permissionResolveRef.current = null;
                   setPermissionRequest(null);
@@ -1170,27 +1422,50 @@ function AppContent({
             )}
             <Box flexDirection="column">
               <InputBox
-                disabled={busy || permissionRequest !== null || teamsDialogOpen || tooSmall || noticeExpanded}
+                disabled={permissionRequest !== null || teamsDialogOpen || tooSmall || noticeExpanded || panel !== null || modelSwitchBusy}
                 columns={columns}
                 historyKey={workDir}
-                compact={rows < 16 || permissionRequest !== null || teamsDialogOpen || noticeExpanded}
-                maxRows={permissionRequest !== null || teamsDialogOpen ? 1 : Math.max(1, Math.min(8, Math.floor(rows / 3)))}
+                compact={preferences.compact || rows < 16 || permissionRequest !== null || teamsDialogOpen || noticeExpanded || panel !== null}
+                maxRows={permissionRequest !== null || teamsDialogOpen || panel ? 1 : preferences.compact ? 3 : Math.max(1, Math.min(8, Math.floor(rows / 3)))}
                 maxSuggestions={Math.max(1, Math.min(8, Math.floor(rows / 4)))}
                 commands={commandRegistryRef.current!.listCommands()}
                 usageTracker={commandUsageTrackerRef.current!}
-                onSubmit={(value, options) => void submit(value, options?.literal ?? false)}
+                onSubmit={(value, options) => {
+                  if (modelSwitchBusy) return false;
+                  if (busy && !options?.literal && value.startsWith("/")) {
+                    const command = parseCommand(value);
+                    if (command && commandRegistryRef.current!.find(command.name) && !["model", "tasks", "settings", "hotkeys", "files"].includes(command.name.toLowerCase())) { setCompactNotice("当前任务执行中，此命令暂不可用；草稿已保留。"); return false; }
+                  }
+                  if (busy && steeringRef.current.length >= 20) { setCompactNotice("当前任务补充已达 20 条，草稿保留；Alt+Q 可取回。"); return false; }
+                  try { updateSessionState(workDir, sessionIdRef.current, { draft: "" }); }
+                  catch { setCompactNotice("草稿保存失败，尚未发送，请检查会话目录后重试。"); return false; }
+                  draftRef.current = ""; setDraftValue("");
+                  void submit(value, options?.literal ?? false).catch((error: unknown) => {
+                    setCompactNotice(`操作失败：${error instanceof Error ? error.message : String(error)}`);
+                    restoreDraft(value);
+                  });
+                }}
+                onDraftChange={(value) => { draftRef.current = value; setDraftValue(value); }}
+                restoredDraft={restoredDraft}
+                onFileSearch={(query, range) => { void openFiles(query, range); }}
+                onDequeue={() => steeringRef.current.pop()}
               />
+              {references.length > 0 && !panel && <Text dimColor wrap="truncate-end">引用：{references.map((file, index) => `${index + 1}:${file.path}`).join(" · ")} · /files remove 序号</Text>}
               <StatusBar
                 mode={mode}
                 busy={busy}
                 teamCount={teammateStates.length}
+                contextTokens={estimateMessages(messages) + contextOverhead + Math.ceil(streamingText.length / 3.5)}
+                {...(modelCapabilities[selectedConfig.model] ? { contextWindow: modelCapabilities[selectedConfig.model]!.contextWindow } : {})}
+                highContrast={preferences.highContrast}
                 {...(inputTokens === undefined ? {} : { inputTokens })}
                 {...(outputTokens === undefined ? {} : { outputTokens })}
               />
-              {rows >= 16 && !permissionRequest && !teamsDialogOpen && !noticeExpanded && <Text dimColor wrap="truncate-end">Enter 发送 · Ctrl+J 换行 · Alt+V 粘贴模式 · PgUp/PgDn 翻页 · Shift+拖选复制 · Ctrl+T 团队</Text>}
+              {rows >= 16 && !preferences.compact && !permissionRequest && !teamsDialogOpen && !noticeExpanded && !panel && <Text dimColor wrap="truncate-end">{preferences.bindings.sessions} 会话 · {preferences.bindings.models} 模型 · {preferences.bindings.tasks} 任务 · /hotkeys 帮助</Text>}
             </Box>
           </>}>
-          {(height) => <ChatView messages={uiMessages} streamingText={streamingText} activeTools={activeTools} maxHeight={height} columns={Math.max(1, columns - 1)} active={!tooSmall && !permissionRequest && !teamsDialogOpen} />}
+          {(height) => panel && !permissionRequest && !teamsDialogOpen && !tooSmall ? <ChoiceDialog key={panel.title} title={panel.title} items={panel.title === "任务面板" ? taskItems : panel.items} columns={columns} maxHeight={height} onClose={() => { panelRequest.current++; setPanel(null); }} onSelect={panel.select} {...(panel.cancel ? { onAction: (id: string) => panel.cancel?.(id) } : {})} {...(panel.hint ? { hint: panel.hint } : {})} previewOnEnter={panel.title === "任务面板"} />
+            : <ChatView messages={uiMessages} streamingText={streamingText} activeTools={activeTools} maxHeight={height} columns={Math.max(1, columns - 1)} active={!tooSmall && !permissionRequest && !teamsDialogOpen && !panel && !noticeExpanded} toolPreview={preferences.toolPreview} highContrast={preferences.highContrast} />}
         </TerminalFrame>
       </Box>
     </Box>

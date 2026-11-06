@@ -1,5 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { discoverInstructions } from "../memory/instructions.js";
 import {
   AutoCompactTrackingState,
   forceCompact,
@@ -14,7 +15,7 @@ import type {
   ToolResultBlock,
   ToolUseBlock,
 } from "../conversation/types.js";
-import { ContextTooLongError, type Provider } from "../llm/client.js";
+import { ContextTooLongError, NetworkError, RateLimitError, StreamProtocolError, TransientProviderError, type Provider } from "../llm/client.js";
 import type { FileHistory } from "../filehistory/filehistory.js";
 import type { StreamEvent, ToolDefinition } from "../llm/events.js";
 import {
@@ -25,10 +26,12 @@ import {
 import {
   PermissionChecker,
   type Decision,
+  type PermissionResponse,
 } from "../permissions/checker.js";
 import { ToolRegistry } from "../tools/registry.js";
-import type { ToolCategory } from "../tools/types.js";
-import { applyBudget } from "../toolresult/budget.js";
+import type { ToolCategory, ToolResult, ToolContext } from "../tools/types.js";
+import { validateToolInput } from "../tools/validate.js";
+import { applyBudget, toolOutputBudget } from "../toolresult/budget.js";
 import { buildConversation } from "../toolresult/reconstruct.js";
 import { ContentReplacementState } from "../toolresult/state.js";
 import { buildActiveSkillsReminder } from "../skills/executor.js";
@@ -40,8 +43,13 @@ import type { HookActionExecutor, HookContext } from "../hooks/types.js";
 import { fetchSafeText } from "../security/safe-fetch.js";
 import { StreamingExecutor } from "./streaming-executor.js";
 import type { AgentEvent } from "./events.js";
+import { DEFAULT_EXECUTION, TaskBudget, abortableDelay, withIdleTimeout, type ExecutionSettings } from "./execution.js";
+import { TaskDelivery } from "./delivery.js";
+import { inspectionReminder, inspectionRequestsChecks } from "./task-intent.js";
+import { taskApprovalEligible } from "../permissions/task-approval.js";
+import { withEvents } from "./event-queue.js";
 
-export const DEFAULT_MAX_ITERATIONS = 20;
+export const DEFAULT_MAX_ITERATIONS = DEFAULT_EXECUTION.maxIterations;
 // Kept temporarily for existing consumers; runtime output budgeting is now in toolresult/budget.
 export const MAX_TOOL_OUTPUT_CHARS = 10_000;
 const MAX_CONSECUTIVE_UNKNOWN_TOOL_TURNS = 3;
@@ -56,6 +64,10 @@ export interface AgentConfig {
   maxIterations?: number;
   contextWindow?: number;
   maxOutput?: number;
+  execution?: Partial<ExecutionSettings>;
+  trackDelivery?: boolean;
+  onToolStart?: ToolContext["onToolStart"];
+  onToolEnd?: ToolContext["onToolEnd"];
   fileHistory?: FileHistory;
   recoveryState?: RecoveryState;
   replacementState?: ContentReplacementState;
@@ -63,12 +75,13 @@ export interface AgentConfig {
   toolFilter?: (toolName: string) => boolean;
   hookEngine?: HookEngine;
   transientReminders?: () => readonly string[];
+  takeSteering?: () => readonly string[];
   checker: PermissionChecker;
   onPermissionRequest?: (
     toolName: string,
     args: Record<string, unknown>,
     decision: Decision,
-  ) => Promise<"allow" | "deny" | "allowAlways">;
+  ) => Promise<PermissionResponse>;
 }
 
 export class Agent {
@@ -83,6 +96,15 @@ export class Agent {
   readonly #toolFilter: ((toolName: string) => boolean) | undefined;
   readonly #hookActionExecutor: HookActionExecutor;
   #usageAnchor: UsageAnchor | null = null;
+  readonly #settings: ExecutionSettings;
+  readonly #delivery: TaskDelivery;
+  #signal: AbortSignal;
+  #budget: TaskBudget | undefined;
+  readonly #executedIds = new Set<string>();
+  readonly #instructionPaths = new Set<string>();
+  readonly #failureCounts = new Map<string, number>();
+  readonly #uncertainOperations = new Set<string>();
+  #taskApproved = false;
 
   constructor(private readonly config: AgentConfig) {
     this.#checker = config.checker;
@@ -92,23 +114,43 @@ export class Agent {
     this.#activeSkills = config.activeSkills ?? new Map();
     this.#toolFilter = config.toolFilter;
     this.#hookActionExecutor = this.createHookActionExecutor();
+    this.#settings = { ...DEFAULT_EXECUTION, ...config.execution };
+    this.#signal = config.abortSignal ?? new AbortController().signal;
+    const prompt = config.conversation.getMessages().filter((message) => message.role === "user" && !Conversation.visibleText(message).startsWith("<system-reminder>")).at(-1);
+    this.#delivery = new TaskDelivery(prompt ? Conversation.visibleText(prompt) : "", config.workDir, config.checker.mode === "plan");
+    for (const source of discoverInstructions(config.workDir)) this.#instructionPaths.add(source.path);
+    const calls = new Map<string, ToolUseBlock>();
+    for (const message of config.conversation.getMessages()) for (const block of message.content) {
+      if (block.type === "tool_use") { this.#executedIds.add(block.id); calls.set(block.id, block); }
+      if (block.type === "tool_result" && block.executionState === "unknown") {
+        const call = calls.get(block.toolUseId);
+        if (call) this.#uncertainOperations.add(JSON.stringify([call.name, call.input]));
+      }
+    }
   }
 
   async *run(): AsyncGenerator<AgentEvent> {
-    const maxIterations = this.config.maxIterations ?? DEFAULT_MAX_ITERATIONS;
+    this.#taskApproved = false;
+    const maxIterations = this.config.maxIterations ?? this.#settings.maxIterations;
     const checker = this.#checker;
     let consecutiveUnknownToolTurns = 0;
     let contextRecoveryAttempted = false;
+    let truncations = 0;
+    this.#budget = new TaskBudget(this.#settings.taskTimeoutMs, this.config.abortSignal);
+    this.#signal = this.#budget.signal;
 
-    await this.fireHook("session_start");
     try {
+      if (this.config.trackDelivery) await this.#delivery.initialize();
+      await this.fireHook("session_start");
       for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-      if (this.config.abortSignal?.aborted) {
-        yield { type: "loop_complete", stopReason: "interrupted" };
+      if (this.#signal.aborted) {
+        if (this.config.trackDelivery) yield { type: "delivery", report: this.#delivery.report(this.#budget.controller.signal.aborted ? "budget_exhausted" : "cancelled") };
+        yield { type: "loop_complete", stopReason: this.#budget.controller.signal.aborted ? "task_timeout" : "interrupted" };
         return;
       }
 
       yield { type: "iteration_start", iteration };
+      await this.consumeSteering(this.config.takeSteering?.() ?? []);
       const compactResult = await manageContext(
         this.config.conversation,
         this.config.provider,
@@ -118,6 +160,8 @@ export class Agent {
         this.#recoveryState,
         this.config.registry.listTools().map((tool) => tool.name),
         this.#usageAnchor,
+        this.#signal,
+        applyBudget(this.config.conversation.getMessages(), this.config.workDir, this.#replacementState, toolOutputBudget(this.config.contextWindow ?? 200_000, this.config.maxOutput ?? 8192)),
       );
       if (compactResult.message !== "") {
         yield {
@@ -127,6 +171,11 @@ export class Agent {
         };
       }
       if (compactResult.compacted) this.#usageAnchor = null;
+      if (compactResult.blocked) {
+        yield { type: "error", message: compactResult.message };
+        if (this.config.trackDelivery) yield { type: "delivery", report: this.#delivery.report("blocked") };
+        yield { type: "loop_complete", stopReason: "context_too_long" }; return;
+      }
 
       if (checker.mode === "plan") {
         const planPath = getPlanPath(this.config.workDir);
@@ -148,7 +197,7 @@ export class Agent {
       const streamResult = yield* this.streamResponse(
         response,
         tools,
-        [skillReminder, ...hookReminders, ...transientReminders],
+        [skillReminder, ...hookReminders, ...transientReminders, ...(this.#delivery.readOnlyInspection ? [inspectionReminder(this.#delivery.goal)] : [])],
       );
 
       if (streamResult === "context_too_long") {
@@ -164,6 +213,7 @@ export class Agent {
             this.config.provider,
             this.#recoveryState,
             this.config.registry.listTools().map((tool) => tool.name),
+            this.#signal,
           );
           this.#usageAnchor = null;
           yield {
@@ -185,19 +235,48 @@ export class Agent {
         }
       }
 
-      if (streamResult !== "completed" || this.config.abortSignal?.aborted) {
+      if (streamResult !== "completed" || this.#signal.aborted) {
         // An unfinished tool request must not be kept in history without a result.
         this.commitAssistant(response, false);
+        if (this.config.trackDelivery) yield { type: "delivery", report: this.#delivery.report(this.#budget.controller.signal.aborted ? "budget_exhausted" : this.#signal.aborted ? "cancelled" : "failed") };
         yield {
           type: "loop_complete",
-          stopReason: this.config.abortSignal?.aborted ? "interrupted" : "error",
+          stopReason: this.#budget.controller.signal.aborted ? "task_timeout" : this.#signal.aborted ? "interrupted" : "error",
         };
         return;
+      }
+
+      if (response.stopReason === "length" || response.stopReason === "max_tokens") {
+        yield { type: "stream_reset" };
+        if (++truncations > this.#settings.maxProviderRetries) {
+          yield { type: "error", message: "模型输出连续截断；未执行该响应中的工具，请缩小任务或提高输出预算。" };
+          yield { type: "loop_complete", stopReason: "length" }; return;
+        }
+        this.commitAssistant(response, false);
+        this.config.conversation.addSystemReminder("上一响应达到输出上限，工具未执行。请缩短回复并重新发出完整工具参数；不要假设修改已经生效。");
+        continue;
+      }
+
+      if (response.stopReason === "content_filter" || response.stopReason === "refusal") {
+        this.commitAssistant(response, false);
+        if (this.config.trackDelivery) yield { type: "delivery", report: this.#delivery.report("blocked") };
+        yield { type: "error", message: "模型拒绝或过滤了响应，工具未执行。" };
+        yield { type: "loop_complete", stopReason: response.stopReason }; return;
       }
 
       await this.fireHook("post_receive", { message: response.text });
       this.commitAssistant(response);
       if (response.toolUses.length === 0) {
+        const steering = this.config.takeSteering?.() ?? [];
+        if (steering.length) {
+          await this.consumeSteering(steering);
+          yield { type: "turn_complete" }; continue;
+        }
+        if (this.config.trackDelivery) {
+          const continuation = await this.#delivery.continuation();
+          if (continuation) { this.config.conversation.addSystemReminder(continuation); yield { type: "turn_complete" }; continue; }
+          yield { type: "delivery", report: this.#delivery.report() };
+        }
         await this.fireHook("turn_end");
         yield response.stopReason === undefined
           ? { type: "loop_complete" }
@@ -215,6 +294,11 @@ export class Agent {
       yield* this.executeTools(response.toolUses, checker);
       await this.fireHook("turn_end");
       yield { type: "turn_complete" };
+      if (this.#delivery.repairRounds >= this.#settings.maxRepairRounds) {
+        if (this.config.trackDelivery) yield { type: "delivery", report: this.#delivery.report("failed") };
+        yield { type: "error", message: "已达到验证修复轮次上限；保留已生效的修改和失败日志。" };
+        yield { type: "loop_complete", stopReason: "verification_failed" }; return;
+      }
 
       if (consecutiveUnknownToolTurns >= MAX_CONSECUTIVE_UNKNOWN_TOOL_TURNS) {
         yield {
@@ -227,10 +311,21 @@ export class Agent {
       }
 
       yield { type: "error", message: "已达到最大执行轮次，已停止本次任务。" };
+      if (this.config.trackDelivery) yield { type: "delivery", report: this.#delivery.report("budget_exhausted") };
       yield { type: "loop_complete", stopReason: "max_iterations" };
     } finally {
+      this.#budget.dispose();
       await this.fireHook("session_end");
     }
+  }
+
+  private async consumeSteering(messages: readonly string[]): Promise<void> {
+    const wasReadOnly = this.#delivery.readOnlyInspection;
+    for (const message of messages) {
+      this.config.conversation.addUserMessage(message);
+      this.#delivery.goal += `\n${message}`;
+    }
+    if (wasReadOnly && !this.#delivery.readOnlyInspection && this.config.trackDelivery) await this.#delivery.initialize();
   }
 
   private async *streamResponse(
@@ -246,27 +341,45 @@ export class Agent {
         .map((reminder) => Conversation.systemReminderMessage(reminder)),
     ];
     const apiConversation = buildConversation(
-      applyBudget(requestMessages, this.config.workDir, this.#replacementState),
+      applyBudget(requestMessages, this.config.workDir, this.#replacementState, toolOutputBudget(this.config.contextWindow ?? 200_000, this.config.maxOutput ?? 8192)),
     );
     const sentMessageCount = messages.length;
-    try {
-      for await (const event of this.config.provider.stream({
-        systemPrompt: this.config.systemPrompt,
-        messages: apiConversation.getMessages(),
-        ...(tools.length === 0 ? {} : { tools }),
-        ...(this.config.abortSignal === undefined ? {} : { signal: this.config.abortSignal }),
-      })) {
-        for (const agentEvent of this.recordEvent(response, event, sentMessageCount)) yield agentEvent;
+    for (let attempt = 0; ; attempt++) {
+      const requestController = new AbortController();
+      const signal = AbortSignal.any([this.#signal, requestController.signal]);
+      try {
+        const stream = this.config.provider.stream({
+          maxOutputTokens: this.config.maxOutput ?? 8192,
+          systemPrompt: this.config.systemPrompt, messages: apiConversation.getMessages(),
+          ...(tools.length === 0 ? {} : { tools }), signal,
+        });
+        for await (const event of withIdleTimeout(stream, this.#settings.requestIdleTimeoutMs, requestController, signal)) {
+          for (const agentEvent of this.recordEvent(response, event, sentMessageCount)) yield agentEvent;
+        }
+        if (!response.terminal) throw new StreamProtocolError("模型流缺少正常终止事件");
+        return "completed";
+      } catch (error) {
+        if (error instanceof ContextTooLongError) return "context_too_long";
+        const retryable = error instanceof StreamProtocolError || error instanceof NetworkError
+          || error instanceof RateLimitError || error instanceof TransientProviderError
+          || requestController.signal.aborted;
+        if (!this.#signal.aborted && retryable && attempt < this.#settings.maxProviderRetries) {
+          const delayMs = error instanceof RateLimitError && error.retryAfterSeconds !== undefined
+            ? Math.max(0, error.retryAfterSeconds * 1000) : Math.min(1000 * 2 ** attempt, 8000);
+          yield { type: "retry", attempt: attempt + 1, delayMs, message: "模型请求失败，正在有限重试；未重放工具操作。" };
+          yield { type: "stream_reset" };
+          response.text = ""; response.toolUses = []; response.thinking = []; response.terminal = false;
+          delete response.stopReason;
+          try { await abortableDelay(delayMs, this.#signal); } catch { return "failed"; }
+          continue;
+        }
+        const message = this.#budget?.controller.signal.aborted ? "任务执行预算已用尽。"
+          : this.#signal.aborted ? "任务已取消。" : error instanceof Error ? error.message : String(error);
+        yield { type: "error", message };
+        return "failed";
       }
-      return "completed";
-    } catch (error) {
-      if (error instanceof ContextTooLongError) return "context_too_long";
-      const message = error instanceof Error ? error.message : String(error);
-      yield { type: "error", message };
-      return "failed";
     }
   }
-
   private recordEvent(
     response: CollectedResponse,
     event: StreamEvent,
@@ -304,11 +417,10 @@ export class Agent {
           args: event.arguments,
         }];
       case "usage":
-        this.#usageAnchor = {
+        if (event.inputTokens !== undefined || (event.cacheReadInputTokens ?? 0) > 0 || (event.cacheCreationInputTokens ?? 0) > 0) this.#usageAnchor = {
           baselineTokens: (event.inputTokens ?? 0)
             + (event.cacheReadInputTokens ?? 0)
-            + (event.cacheCreationInputTokens ?? 0)
-            + (event.outputTokens ?? 0),
+            + (event.cacheCreationInputTokens ?? 0),
           anchorCount: sentMessageCount,
         };
         return [{
@@ -323,6 +435,7 @@ export class Agent {
             : { cacheCreationInputTokens: event.cacheCreationInputTokens }),
         }];
       case "done":
+        response.terminal = true;
         if (event.stopReason !== undefined) response.stopReason = event.stopReason;
         return [];
       case "tool_call_start":
@@ -338,7 +451,15 @@ export class Agent {
     const results: ToolExecution[] = [];
 
     for (const batch of createExecutionBatches(toolUses, this.config.registry)) {
-      const batchResults = await this.executeBatch(batch, checker);
+      const batchResults = yield* withEvents<AgentEvent, ToolExecution[]>((emit) => this.executeBatch(batch, checker, emit));
+      if (this.config.trackDelivery) await this.#delivery.observe(new Set(batchResults.filter((result) => !result.result.isError && (result.toolName === "EditFile" || result.toolName === "WriteFile")).map((result) => {
+        const args = batch.find((call) => call.id === result.toolId)!.input;
+        return resolve(this.config.workDir, String(args.file_path));
+      })));
+      for (const result of batchResults) {
+        const call = batch.find((item) => item.id === result.toolId);
+        if (call) this.#delivery.record(result.toolName, call.input, result.result);
+      }
       results.push(...batchResults);
     }
 
@@ -348,11 +469,19 @@ export class Agent {
       toolUseId: result.toolId,
       content: result.result.output,
       isError: result.result.isError,
+      ...(result.result.metadata?.status === "unknown" ? { executionState: "unknown" as const } : {}),
     }));
     this.config.conversation.addToolResultsMessage(resultBlocks);
 
     for (const result of results) {
       const toolUse = toolUses.find((item) => item.id === result.toolId);
+      if (toolUse && result.result.isError) {
+        const signature = createHash("sha256").update(JSON.stringify([this.#delivery.revision, result.toolName, toolUse.input, result.result.metadata?.exitCode ?? result.result.output.replace(/日志：[^\n]*/g, "日志：[已保留]")])).digest("hex");
+        this.#failureCounts.set(signature, (this.#failureCounts.get(signature) ?? 0) + 1);
+        if (this.#failureCounts.get(signature)! >= 3) {
+          this.config.conversation.addSystemReminder("相同工具错误已重复三次且没有有效进展。不要重试相同参数，请改用其他方案，或明确说明阻塞原因。");
+        }
+      }
       await this.fireHook("post_tool_use", {
         toolName: result.toolName,
         ...(toolUse === undefined ? {} : { args: toolUse.input }),
@@ -366,6 +495,7 @@ export class Agent {
         output: result.result.output,
         isError: result.result.isError,
         elapsed: result.elapsed,
+        ...(result.result.metadata ? { metadata: result.result.metadata } : {}),
       };
     }
   }
@@ -373,18 +503,49 @@ export class Agent {
   private async executeBatch(
     toolUses: readonly ToolUseBlock[],
     checker: PermissionChecker,
+    emit: (event: AgentEvent) => void,
   ): Promise<ToolExecution[]> {
     const executor = new StreamingExecutor(this.config.registry, {
       workDir: this.config.workDir,
       readFiles: this.#readFiles,
       fileVersions: this.#fileVersions,
       ...(this.config.fileHistory === undefined ? {} : { fileHistory: this.config.fileHistory }),
-      ...(this.config.abortSignal === undefined ? {} : { abortSignal: this.config.abortSignal }),
+      abortSignal: this.#signal,
+      commandTimeoutSeconds: this.#settings.commandTimeoutSeconds,
+      maxCommandTimeoutSeconds: this.#settings.maxCommandTimeoutSeconds,
+      maxLogBytes: this.#settings.toolOutputDiskLimitBytes,
+      onToolStart: (toolId, toolName, args) => {
+        this.config.onToolStart?.(toolId, toolName, args);
+        emit({ type: "tool_start", toolId, toolName, args });
+      },
+      onToolUpdate: (toolId, toolName, output) => emit({ type: "tool_update", toolId, toolName, output }),
+      onToolEnd: (toolId, toolName, result) => this.config.onToolEnd?.(toolId, toolName, result),
     });
     const executions = new Map<string, ToolExecution>();
 
     for (const toolUse of toolUses) {
       const tool = this.config.registry.get(toolUse.name);
+      if (this.#delivery.readOnlyInspection && (tool?.category === "write" || toolUse.name === "Bash" && !inspectionRequestsChecks(this.#delivery.goal) && /^\s*(?:pnpm|npm)(?:\.cmd)?\s+(?:run\s+)?(?:test|build|typecheck|benchmark(?::[\w-]+)?)(?:\s|$)/i.test(String(toolUse.input.command)))) {
+        executions.set(toolUse.id, { toolId: toolUse.id, toolName: toolUse.name, elapsed: 0, result: { output: "本次只查看改动，未请求修改或运行验证；该工具未执行。请依据已读取内容总结，注明未运行测试。", isError: true, metadata: { status: "not_executed" } } });
+        continue;
+      }
+      const target = typeof toolUse.input.file_path === "string" ? resolve(this.config.workDir, toolUse.input.file_path) : undefined;
+      const newInstructions = target ? discoverInstructions(dirname(target)).filter((source) => !this.#instructionPaths.has(source.path)) : [];
+      for (const source of newInstructions) {
+        this.#instructionPaths.add(source.path);
+        this.config.conversation.addSystemReminder(`Applicable project instructions from ${source.path}:\n${source.content}`);
+      }
+      if (tool?.category === "write" && newInstructions.length) {
+        executions.set(toolUse.id, { toolId: toolUse.id, toolName: toolUse.name, elapsed: 0,
+          result: { output: "检测到此前尚未加载的子目录指令，已加入上下文；本次未写入，请按新指令重新判断修改。", isError: true, metadata: { status: "not_executed" } } });
+        continue;
+      }
+      const validation = tool ? validateToolInput(tool, toolUse.input) : undefined;
+      if (validation || this.#executedIds.has(toolUse.id) || this.#signal.aborted) {
+        executions.set(toolUse.id, { toolId: toolUse.id, toolName: toolUse.name, elapsed: 0,
+          result: { output: validation ? `工具参数无效：${validation}` : this.#signal.aborted ? "操作已取消，工具未执行" : "调用 ID 已执行过；禁止重放，请重新检查现场。", isError: true, metadata: { status: "not_executed" } } });
+        continue;
+      }
       if (tool?.system !== true && this.#toolFilter?.(toolUse.name) === false) {
         executions.set(toolUse.id, {
           toolId: toolUse.id,
@@ -415,7 +576,10 @@ export class Agent {
         continue;
       }
       const category = toolCategory(this.config.registry, toolUse.name);
-      const decision = checker.check(toolUse.name, category, toolUse.input);
+      let decision = checker.check(toolUse.name, category, toolUse.input);
+      const uncertain = this.#uncertainOperations.has(JSON.stringify([toolUse.name, toolUse.input]));
+      if (uncertain && category !== "read" && decision.effect !== "deny") decision = { effect: "ask", reason: "上次同一操作开始后结果未知；请核对现场，再明确决定是否重新执行。" };
+      if (decision.effect === "ask" && this.#taskApproved && !uncertain && taskApprovalEligible(toolUse.name, toolUse.input, checker.mode, decision)) decision = { effect: "allow", reason: "Explicit approval for this task" };
 
       if (decision.effect === "deny") {
         executions.set(toolUse.id, {
@@ -444,11 +608,13 @@ export class Agent {
           });
           continue;
         }
-        const response = await this.#onPermissionRequest(
+        this.#budget?.pause();
+        let response: PermissionResponse;
+        try { response = await this.#onPermissionRequest(
           toolUse.name,
           toolUse.input,
           decision,
-        );
+        ); } finally { this.#budget?.resume(); }
         if (response === "deny") {
           executions.set(toolUse.id, {
             toolId: toolUse.id,
@@ -461,9 +627,11 @@ export class Agent {
         if (response === "allowAlways") {
           checker.allowAlways(toolUse.name, toolUse.input);
         }
+        if (response === "allowTask" && !uncertain && taskApprovalEligible(toolUse.name, toolUse.input, checker.mode, decision)) this.#taskApproved = true;
         // allow / allowAlways 都落到正常执行路径
       }
 
+      this.#executedIds.add(toolUse.id);
       executor.submit(toolUse.id, toolUse.name, toolUse.input);
     }
 
@@ -515,7 +683,7 @@ export class Agent {
       readFiles: this.#readFiles,
       environment: request.environment,
       maxOutputBytes: request.outputLimitBytes,
-      ...(this.config.abortSignal === undefined ? {} : { abortSignal: this.config.abortSignal }),
+      abortSignal: this.#signal,
     });
   }
 
@@ -585,9 +753,10 @@ export class Agent {
       if (typeof filePath !== "string" || filePath === "") continue;
       try {
         const absolutePath = resolve(this.config.workDir, filePath);
-        this.#recoveryState.recordFileRead(absolutePath, await readFile(absolutePath, "utf8"));
+        const result = results.find((result) => result.toolId === toolUse.id);
+        if (result) this.#recoveryState.recordFileRead(absolutePath, result.result.output);
       } catch {
-        // The tool already returned success; a later read failure only omits recovery context.
+        // Recovery is optional and must never replace the actual tool result.
       }
     }
   }
@@ -595,6 +764,7 @@ export class Agent {
 
 
 interface CollectedResponse {
+  terminal?: boolean;
   text: string;
   thinking: ThinkingBlock[];
   toolUses: ToolUseBlock[];
@@ -604,7 +774,7 @@ interface CollectedResponse {
 interface ToolExecution {
   toolId: string;
   toolName: string;
-  result: { output: string; isError: boolean };
+  result: ToolResult;
   elapsed: number;
 }
 

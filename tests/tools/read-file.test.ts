@@ -26,7 +26,9 @@ describe("ReadFileTool", () => {
       { workDir },
     );
 
-    expect(result).toEqual({ output: "2\tsecond\n3\tthird", isError: false });
+    expect(result.isError).toBe(false);
+    expect(result.output).toContain("2\tsecond\n3\tthird");
+    expect(result.output).toContain("offset=3");
   });
 
   it("returns structured errors for missing paths and directories", async () => {

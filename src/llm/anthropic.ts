@@ -6,11 +6,13 @@ import {
   normalizeFetchError,
   parseSSE,
   ProviderResponseError,
+  StreamProtocolError,
   requireResponseBody,
   type ChatRequest,
   type Provider,
 } from "./client.js";
 import type { StreamEvent } from "./events.js";
+import { parseToolArguments } from "./tool-arguments.js";
 
 const ANTHROPIC_VERSION = "2023-06-01";
 const MAX_TOKENS = 8192;
@@ -135,6 +137,7 @@ export class AnthropicProvider implements Provider {
           stopReason = stringAt(payload, "delta", "stop_reason") ?? stopReason;
           if (outputTokens !== undefined) yield { type: "usage", outputTokens };
         } else if (type === "message_stop") {
+          if (toolCalls.size > 0) throw new StreamProtocolError("Anthropic stream ended with unfinished tool blocks");
           yield stopReason === undefined
             ? { type: "done" }
             : { type: "done", stopReason };
@@ -147,10 +150,11 @@ export class AnthropicProvider implements Provider {
       normalizeFetchError(error, request.signal);
     }
 
-    if (!doneEmitted) yield { type: "done" };
+    if (!doneEmitted) throw new StreamProtocolError("Anthropic stream closed before message_stop");
   }
 
   private buildRequestBody(request: ChatRequest): Record<string, unknown> {
+    const maxTokens = request.maxOutputTokens ?? MAX_TOKENS;
     const messages = request.messages.map(toAnthropicMessage);
     markLastUserTailForCache(messages);
     const tools = request.tools?.map((tool) => ({
@@ -171,9 +175,9 @@ export class AnthropicProvider implements Provider {
       }],
       messages,
       stream: true,
-      max_tokens: MAX_TOKENS,
-      ...(this.config.thinking
-        ? { thinking: { type: "enabled", budget_tokens: THINKING_BUDGET_TOKENS } }
+      max_tokens: maxTokens,
+      ...(this.config.thinking && maxTokens > 1024
+        ? { thinking: { type: "enabled", budget_tokens: Math.min(THINKING_BUDGET_TOKENS, maxTokens - 1) } }
         : {}),
       ...(tools === undefined || tools.length === 0 ? {} : { tools }),
     };
@@ -229,16 +233,6 @@ function toAnthropicMessage(message: ConversationMessage): Record<string, unknow
   };
 }
 
-function parseToolArguments(argumentsJson: string): Record<string, unknown> {
-  if (argumentsJson.trim() === "") return {};
-  try {
-    const value: unknown = JSON.parse(argumentsJson);
-    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      return value as Record<string, unknown>;
-    }
-  } catch {}
-  return {};
-}
 
 function getThinking(
   blocks: Map<number, { thinking: string; signature: string }>,

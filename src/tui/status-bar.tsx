@@ -16,17 +16,20 @@ export interface StatusBarProps {
   outputTokens?: number;
   busy?: boolean;
   teamCount?: number;
+  contextTokens?: number;
+  contextWindow?: number;
+  highContrast?: boolean;
 }
 
-export function StatusBar({ mode, inputTokens, outputTokens, busy = false, teamCount = 0 }: StatusBarProps) {
+export function StatusBar({ mode, inputTokens, outputTokens, busy = false, teamCount = 0, contextTokens, contextWindow, highContrast = false }: StatusBarProps) {
   const modeInfo = mode === "default" ? undefined : MODE_DISPLAY[mode];
 
   return (
-    <Text dimColor wrap="truncate-end">
+    <Text dimColor={!highContrast} wrap="truncate-end">
       {modeInfo === undefined
         ? <>default | </>
         : <><Text color={modeInfo.color}>{modeInfo.name} on </Text>(shift+tab to cycle) | </>}
-      · ↑ {inputTokens ?? "-"} · ↓ {outputTokens ?? "-"} · {busy ? "Esc 取消" : "Ctrl+C 两次退出"}{teamCount > 0 ? ` · 团队 ${teamCount}` : ""}
+      {contextTokens !== undefined ? `上下文≈${contextTokens}/${contextWindow ?? "容量未知"} · ` : ""}累计 ↑ {inputTokens ?? "-"} · ↓ {outputTokens ?? "-"} · {busy ? "Esc 取消" : "Ctrl+C 两次退出"}{teamCount > 0 ? ` · 团队 ${teamCount}` : ""}
     </Text>
   );
 }

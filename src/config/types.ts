@@ -26,6 +26,8 @@ export interface AppConfig {
    * 阻止其它合法规则进入 Hook 校验器。
    */
   hooks: unknown[];
+  execution?: Partial<import("../agent/execution.js").ExecutionSettings>;
+  model_capabilities?: Record<string, import("../agent/execution.js").ModelCapabilities>;
 }
 
 export interface MCPConfig {

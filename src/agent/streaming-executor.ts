@@ -1,5 +1,6 @@
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolContext, ToolResult } from "../tools/types.js";
+import { validateToolInput } from "../tools/validate.js";
 
 interface PendingCall {
   toolId: string;
@@ -49,14 +50,27 @@ export class StreamingExecutor {
       }, startedAt);
     }
 
+    let started = false;
+    let ended = false;
     try {
-      return this.result(call, await tool.execute(call.args, this.context), startedAt);
+      const validation = validateToolInput(tool, call.args);
+      if (validation) return this.result(call, { output: `工具参数无效：${validation}`, isError: true }, startedAt);
+      if (this.context.abortSignal?.aborted) return this.result(call, { output: "操作已取消，工具未执行", isError: true, metadata: { status: "cancelled" } }, startedAt);
+      this.context.onToolStart?.(call.toolId, call.toolName, call.args);
+      started = true;
+      const result = await tool.execute(call.args, { ...this.context, onUpdate: (output) => this.context.onToolUpdate?.(call.toolId, call.toolName, output) });
+      ended = true;
+      this.context.onToolEnd?.(call.toolId, call.toolName, result);
+      return this.result(call, result, startedAt);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      return this.result(call, {
-        output: `执行工具 ${call.toolName} 时发生错误：${message}`,
+      const result: ToolResult = {
+        output: ended ? `工具可能已生效，但结果保存失败；请核对现场，禁止盲目重放。${message}` : `执行工具 ${call.toolName} 时发生错误：${message}`,
         isError: true,
-      }, startedAt);
+        ...(ended ? { metadata: { status: "unknown" as const } } : {}),
+      };
+      if (started && !ended) this.context.onToolEnd?.(call.toolId, call.toolName, result);
+      return this.result(call, result, startedAt);
     }
   }
 

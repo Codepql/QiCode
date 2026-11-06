@@ -22,6 +22,7 @@ export interface ToolResultBlock {
   toolUseId: string;
   content: string;
   isError: boolean;
+  executionState?: "unknown" | "not_executed";
 }
 
 export type ConversationBlock =

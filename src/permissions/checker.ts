@@ -17,8 +17,10 @@ import {
 import { dump, load } from "js-yaml";
 import { getPlanPath } from "../prompt/plan-mode.js";
 import type { ToolCategory } from "../tools/types.js";
+import { readOnlyGitCommand } from "./git-readonly.js";
 
 export type DecisionEffect = "allow" | "deny" | "ask";
+export type PermissionResponse = "allow" | "deny" | "allowAlways" | "allowTask";
 
 export type PermissionMode =
   | "default"
@@ -165,6 +167,7 @@ export function isSafeCommand(command: string): boolean {
     return false;
   }
   if (trimmed === "hostname") return true;
+  if (readOnlyGitCommand(trimmed)) return true;
   return SAFE_PREFIXES.some(
     (prefix) =>
       trimmed === prefix ||

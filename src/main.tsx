@@ -60,6 +60,8 @@ async function main(): Promise<void> {
         providers={config.providers}
         mcpServers={mcpConfig.mcp_servers}
         hooks={config.hooks}
+        execution={config.execution ?? {}}
+        modelCapabilities={config.model_capabilities ?? {}}
         workDir={workDir}
       />,
       { exitOnCtrlC: false },

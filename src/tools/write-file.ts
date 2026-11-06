@@ -1,4 +1,5 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
+import { changeSummary } from "./edit-diff.js";
 import { dirname, resolve } from "node:path";
 import { WriteFileDescription } from "./descriptions.js";
 import { strArg, type Tool, type ToolContext, type ToolResult } from "./types.js";
@@ -43,6 +44,8 @@ export class WriteFileTool implements Tool {
         return { output: "错误：覆盖前必须先使用 ReadFile 读取文件", isError: true };
       }
       if (ctx.fileVersions?.has(target)) assertFileVersion(target, ctx.fileVersions.get(target)!);
+      const before = expected === null ? "" : await readFile(target, "utf8");
+      const diff = changeSummary(before, content);
       await mkdir(dirname(target), { recursive: true });
       if (ctx.abortSignal?.aborted) throw new Error("File operation cancelled");
       assertFileVersion(target, expected);
@@ -51,8 +54,9 @@ export class WriteFileTool implements Tool {
       ctx.fileVersions?.set(target, contentHash(content));
       ctx.fileHistory?.recordWrite(target);
       return {
-        output: `文件已写入：${filePath}（${content.split("\n").length} 行）`,
+        output: `文件已写入：${filePath}（${content.split("\n").length} 行）\n${diff.diff}`,
         isError: false,
+        metadata: { filePath: absolutePath, ...diff, status: "completed" },
       };
       }, ctx.abortSignal);
     } catch (error) {

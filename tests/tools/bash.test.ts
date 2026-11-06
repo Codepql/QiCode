@@ -55,7 +55,9 @@ describe("BashTool", () => {
       { workDir: process.cwd() },
     );
 
-    expect(result).toEqual({ output: "错误：命令执行超过 1 秒", isError: true });
+    expect(result.isError).toBe(true);
+    expect(result.output).toContain("错误：命令执行超过 1 秒");
+    expect(result.metadata?.status).toBe("timeout");
   }, 5000);
 
   it("returns an error when command is missing", async () => {

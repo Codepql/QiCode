@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { arch, platform } from "node:os";
 import { promisify } from "node:util";
+import { resolveShell } from "../tools/shell.js";
 import {
   doingTasksSection,
   environmentSection,
@@ -46,7 +47,7 @@ export async function detectEnvironment(
     workDir,
     os: platform(),
     arch: arch(),
-    shell: process.env.SHELL ?? process.env.ComSpec ?? "unknown",
+    shell: resolveShell().file,
     isGitRepo: false,
     gitBranch: "",
     model: "",

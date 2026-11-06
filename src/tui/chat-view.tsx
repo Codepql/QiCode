@@ -12,13 +12,15 @@ export interface ChatViewProps {
   maxHeight?: number;
   columns?: number;
   active?: boolean;
+  toolPreview?: boolean;
+  highContrast?: boolean;
 }
 
-export function ChatView({ messages, streamingText = "", activeTools = [], maxHeight, columns, active = true }: ChatViewProps) {
+export function ChatView({ messages, streamingText = "", activeTools = [], maxHeight, columns, active = true, toolPreview = true, highContrast = false }: ChatViewProps) {
   const window = useWindowSize();
   const width = Math.max(1, columns ?? window.columns ?? 80);
   const height = Math.max(1, maxHeight ?? (window.rows ?? 24) - 8);
-  const lines = useMemo(() => layoutChat(messages, streamingText, activeTools, width), [messages, streamingText, activeTools, width]);
+  const lines = useMemo(() => layoutChat(messages, streamingText, activeTools, width, toolPreview), [messages, streamingText, activeTools, width, toolPreview]);
   const contentHeight = Math.max(1, height - (lines.length > height ? 1 : 0));
   const maxScroll = Math.max(0, lines.length - contentHeight);
   const [following, setFollowing] = useState(true);
@@ -52,7 +54,7 @@ export function ChatView({ messages, streamingText = "", activeTools = [], maxHe
         : line.kind === "assistant" || line.kind === "heading" ? { color: "green" as const, bold: true }
         : line.kind === "error" ? { color: "red" as const }
         : line.kind === "code" ? { color: "blue" as const }
-        : line.kind === "tool" ? { dimColor: true } : {})}>{line.text || " "}</Text>)}
+        : line.kind === "tool" ? { dimColor: !highContrast } : {})}>{line.text || " "}</Text>)}
     {lines.length > height && <Text dimColor wrap="truncate-end">{following ? "已到最新" : `历史 ${top + 1}/${lines.length} · ${seen.current === latest ? "已暂停跟随" : "有新输出"}`} · Ctrl+End 回到最新</Text>}
   </Box>;
 }
