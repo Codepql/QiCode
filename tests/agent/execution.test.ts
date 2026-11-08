@@ -1,11 +1,24 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { TaskBudget, parseExecution, withIdleTimeout } from "../../src/agent/execution.js";
+import { TaskBudget, ApprovalClock, awaitWithSignal, parseExecution, withIdleTimeout } from "../../src/agent/execution.js";
 import { validateToolInput } from "../../src/tools/validate.js";
 import type { Tool } from "../../src/tools/types.js";
 import { preciseReplace } from "../../src/tools/edit-diff.js";
 afterEach(() => vi.useRealTimers());
 
 describe("execution boundaries", () => {
+  it("pauses parent and child budgets across overlapping approvals, without suppressing cancellation", async () => {
+    vi.useFakeTimers(); const clock = new ApprovalClock(); const external = new AbortController();
+    const parent = new TaskBudget(100, external.signal), child = new TaskBudget(100); const detachParent = clock.attach(parent), detachChild = clock.attach(child);
+    await vi.advanceTimersByTimeAsync(20); const a = clock.enter(), b = clock.enter();
+    await vi.advanceTimersByTimeAsync(1000); a(); await vi.advanceTimersByTimeAsync(1000); expect(child.signal.aborted).toBe(false);
+    external.abort(); expect(parent.signal.aborted).toBe(true); b(); b();
+    await vi.advanceTimersByTimeAsync(79); expect(child.signal.aborted).toBe(false); await vi.advanceTimersByTimeAsync(1); expect(child.signal.aborted).toBe(true);
+    detachParent(); detachChild(); parent.dispose(); child.dispose();
+  });
+  it("cancels initialization even when a provider ignores abort", async () => {
+    const controller = new AbortController(); const pending = awaitWithSignal(new Promise(() => {}), controller.signal);
+    controller.abort(new Error("stop initialization")); await expect(pending).rejects.toThrow("stop initialization");
+  });
   it("pauses execution time during approval while retaining external cancellation", async () => {
     vi.useFakeTimers(); const external = new AbortController(); const budget = new TaskBudget(100, external.signal);
     await vi.advanceTimersByTimeAsync(30); budget.pause(); await vi.advanceTimersByTimeAsync(2000);

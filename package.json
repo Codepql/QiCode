@@ -31,6 +31,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "benchmark:offline": "tsx benchmarks/run.ts --offline",
+    "benchmark:phase4": "tsx benchmarks/run-phase4.ts --offline",
     "prepublishOnly": "pnpm run typecheck && pnpm run build"
   },
   "keywords": [],

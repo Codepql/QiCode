@@ -172,19 +172,21 @@ pnpm dev
 
 第二期加入了命令实时输出与日志、编辑 diff、修改后的验证记录、结构化会话恢复和执行预算。默认总任务预算 15 分钟，模型响应空闲上限 120 秒，单命令默认 120 秒、可指定到 600 秒；权限等待暂停总任务计时。模型可用 Bash 的 `purpose: verification` 标记检查，验证失败会回到执行循环，最多 3 轮失败修复。代码改变后，旧验证记录不再作为当前通过证据。
 
-可在现有配置中增加 `execution`，例如 `{ "taskTimeoutMs": 900000, "maxIterations": 80 }`；`model_capabilities` 按模型名配置 `{ "contextWindow": 128000, "maxOutput": 8192 }`。未配置模型能力时采用 32768 上下文窗口。完整实现范围和待验收项见 [第二期实现记录](docs/Optimize-plan/terminal-ux/phase-2-implementation.md)。
+可在现有配置中增加 `execution`，例如 `{ "taskTimeoutMs": 900000, "maxIterations": 80 }`；`model_capabilities` 按模型名配置 `{ "contextWindow": 128000, "maxOutput": 8192 }`，显式配置优先。官方 `https://api.deepseek.com` 端点的 `deepseek-v4-flash`、`deepseek-v4-pro`、`deepseek-flash` 内置 1,048,576 上下文容量资料，默认请求输出预算仍为 8192；其它未知模型或代理端点才回退到 32768，不按名称模糊猜容量。状态栏与模型详情显示来源。自动压缩阈值为容量减一次统一预留：`max(输出预算, min(16384, 容量 / 8 向下取整))`；1M/8K 时为 1,032,192，未知 32K/8K 时为 24,576。以最近一次有效输入 usage 加新增消息估算校准，压缩、恢复和历史回退使旧校准失效。完整实现范围和待验收项见 [第二期实现记录](docs/Optimize-plan/terminal-ux/phase-2-implementation.md)。
 
 ## Built-in Tools
 
 ### 会话与长期使用
 
-常见的独立 `git diff` / `git log` / `git show` 查看命令自动放行，执行时禁用外部 diff、textconv 等辅助程序；复合命令仍按原权限处理。首次授权时可直接按 **T**，允许本次任务中的文件编辑和普通命令，任务结束失效，不落盘；已识别的发布、删除、外部操作、显式权限规则和结果未知操作单独处理。也可按 Y 仅允许本次调用、A 记住这条操作、N 拒绝，无需回车。`/permission mode acceptEdits` 自动允许工作区文件编辑；`/permission mode bypassPermissions` 允许普通工具连续执行，内置危险命令、路径边界和显式拒绝规则仍然生效。
+常见的独立 `git diff` / `git log` / `git show` 查看命令自动放行，执行时禁用外部 diff、textconv 等辅助程序。`dir` 和最多 8 段简单只读命令组成的 `&&` 链也自动放行，例如 `git status --short && echo "---" && dir`；组合内的 git diff/log/show 也逐段禁用外部辅助程序后放行，例如 git status --short && git log --oneline -5；涉及管道、重定向、程序执行或未识别参数时仍按原权限处理。普通任务首次授权默认选中“本次任务允许编辑和普通命令”，直接按 **Enter 或 T** 确认，后续符合范围的步骤不再逐条询问，任务结束失效，不落盘；已识别的发布、删除、外部操作、显式权限规则和结果未知操作单独处理。也可按 Y 仅允许本次调用、A 记住这条操作、N/Esc 拒绝，无需回车。`/permission mode acceptEdits` 自动允许工作区文件编辑；`/permission mode bypassPermissions` 允许普通工具连续执行，内置危险命令、路径边界和显式拒绝规则仍然生效。
 
 `/resume` 搜索和预览会话，`/resume latest` 恢复最近会话，`/rename 标题` 命名，`/new` 新建。`/model` 选择已配置模型，运行中登记的切换在任务结束后生效。快捷入口为 Alt+S 会话、Alt+M 模型、Alt+T 任务、Alt+B 设置，`/hotkeys` 查看完整按键。
 
 `/files` 或输入 `@路径` 后按 Tab 搜索文件，确认后引用路径而不自动注入整份正文；`/files remove 序号` 移除引用。`/tasks` 查看任务详情，Ctrl+X 取消所选任务。`/rewind` 先预览检查点，再选择文件或文件与对话的恢复范围。
 
 `/settings` 保存项目级布局、显示和安全权限偏好，存储在 `.qicode/ui.json`；`/settings bind tasks alt+b` 可调整入口按键，冲突会拒绝保存。详细范围见 [第三期实现记录](docs/Optimize-plan/terminal-ux/phase-3-implementation.md)。
+
+第四期已接入本地 `/stats` 性能记录、统一模型预算、并发授权排队和文件读取证据；使用方式与验证范围见 [第四期实现记录](docs/Optimize-plan/terminal-ux/phase-4-reliability/implementation.md)。真实模型/pi 对照与人工终端验收仍待进行。
 
 ### 工具列表
 

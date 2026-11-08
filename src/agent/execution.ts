@@ -42,6 +42,29 @@ export class TaskBudget {
   dispose(): void { clearTimeout(this.timer); }
 }
 
+/** Share waiting time, not permissions, between a task and its descendants. */
+export class ApprovalClock {
+  private depth = 0;
+  private readonly budgets = new Set<{ budget: TaskBudget; start(): void; end(): void }>();
+  attach(budget: TaskBudget, start: () => void = () => {}, end: () => void = () => {}): () => void {
+    const entry = { budget, start, end }; this.budgets.add(entry);
+    if (this.depth) { budget.pause(); start(); }
+    return () => { if (this.budgets.delete(entry) && this.depth) end(); };
+  }
+  enter(): () => void {
+    if (this.depth++ === 0) for (const entry of this.budgets) { entry.budget.pause(); entry.start(); }
+    let left = false;
+    return () => { if (left) return; left = true; if (--this.depth === 0) for (const entry of this.budgets) { entry.end(); entry.budget.resume(); } };
+  }
+}
+
+export async function awaitWithSignal<T>(value: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw signal.reason ?? new Error("Cancelled");
+  let abort: () => void = () => {};
+  try { return await Promise.race([value, new Promise<never>((_resolve, reject) => { abort = () => reject(signal.reason ?? new Error("Cancelled")); signal.addEventListener("abort", abort, { once: true }); })]); }
+  finally { signal.removeEventListener("abort", abort); }
+}
+
 export async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) throw signal.reason ?? new Error("Cancelled");
   await new Promise<void>((resolve, reject) => {

@@ -7,6 +7,8 @@ import type {
 export class Conversation {
   readonly #messages: ConversationMessage[] = [];
   #longTermMemoryInjected = false;
+  #contextGeneration = 0;
+  get contextGeneration(): number { return this.#contextGeneration; }
 
   addUserMessage(text: string): void {
     if (text.trim() === "") {
@@ -86,6 +88,7 @@ export class Conversation {
     messages: readonly ConversationMessage[],
     prefix: readonly ConversationMessage[] = [],
   ): void {
+    this.#contextGeneration++;
     this.#messages.length = 0;
     this.#messages.push(...prefix.map(cloneMessage), ...messages.map(cloneMessage));
   }
@@ -97,7 +100,7 @@ export class Conversation {
     if (summaryContent.trim() === "") {
       throw new Error("Compacted summary must not be empty");
     }
-
+    this.#contextGeneration++;
     this.#messages.length = 0;
     this.#messages.push({
       role: "user",
@@ -106,11 +109,13 @@ export class Conversation {
   }
 
   clear(): void {
+    this.#contextGeneration++;
     this.#messages.length = 0;
   }
 
   truncateTo(messageCount: number): void {
     if (!Number.isInteger(messageCount) || messageCount < 0) return;
+    if (messageCount < this.#messages.length) this.#contextGeneration++;
     this.#messages.splice(messageCount);
   }
 
@@ -154,6 +159,7 @@ function cloneBlock(block: ConversationBlock): ConversationBlock {
         content: block.content,
         isError: block.isError,
         ...(block.executionState ? { executionState: block.executionState } : {}),
+        ...(block.evidence ? { evidence: { ...block.evidence } } : {}),
       };
   }
 }

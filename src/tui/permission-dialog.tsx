@@ -23,7 +23,9 @@ export interface PermissionDialogProps {
 }
 
 export function PermissionDialog({ toolName, argsSummary, reason, maxHeight, columns, allowTask = false, onComplete }: PermissionDialogProps) {
-  const options = OPTIONS.filter((option) => allowTask || option.action !== "allowTask");
+  const options = allowTask
+    ? [OPTIONS[3]!, ...OPTIONS.slice(0, 3)]
+    : OPTIONS.filter((option) => option.action !== "allowTask");
   const window = useWindowSize();
   const width = Math.max(1, (columns ?? window.columns) - 1);
   const details = wrapRows(sanitizeTerminalText(`${argsSummary}\n原因：${reason}`), width);
@@ -56,6 +58,6 @@ export function PermissionDialog({ toolName, argsSummary, reason, maxHeight, col
     <Text bold color="yellow" wrap="truncate-end">{truncateCells(`${toolName} 需要授权`, width)}</Text>
     {details.slice(top, top + detailHeight).map((line, index) => <Text key={index} dimColor wrap="truncate-end">{line.text || " "}</Text>)}
     {options.map((option, index) => <Text key={option.action} inverse={cursor === index} wrap="truncate-end">{cursor === index ? "› " : "  "}{option.label}</Text>)}
-    <Text dimColor wrap="truncate-end">Y 本次 · A 记住{allowTask ? " · T 本任务（结束失效）" : ""} · N/Esc 拒绝{details.length > detailHeight ? " · PgUp/PgDn 详情" : ""}</Text>
+    <Text dimColor wrap="truncate-end">{allowTask ? "Enter/T 批准本任务 · Y 仅本次" : "Y 本次"} · A 记住 · N/Esc 拒绝{details.length > detailHeight ? " · PgUp/PgDn 详情" : ""}</Text>
   </Box>;
 }

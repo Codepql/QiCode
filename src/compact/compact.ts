@@ -4,6 +4,9 @@ import type { Provider } from "../llm/client.js";
 import type { CompactBoundaryPayload } from "../session/session.js";
 import { RecoveryState } from "./recovery.js";
 import { withIdleTimeout } from "../agent/execution.js";
+import { contextReserve, type EffectiveBudget } from "../agent/budgets.js";
+import type { RunMetrics, SpanStatus } from "../metrics/run-metrics.js";
+import { measuredProvider } from "../metrics/provider.js";
 
 export const MAX_CONSECUTIVE_FAILURES = 3;
 export const CHARS_PER_TOKEN = 3.5;
@@ -27,6 +30,8 @@ export interface CompactResult {
 export interface UsageAnchor {
   baselineTokens: number;
   anchorCount: number;
+  overheadTokens?: number;
+  generation?: number;
 }
 
 export class AutoCompactTrackingState {
@@ -39,9 +44,7 @@ export function computeCompactThreshold(
   maxOutput: number,
   manual = false,
 ): number {
-  const effectiveWindow = contextWindow - Math.min(maxOutput, SUMMARY_OUTPUT_RESERVE);
-  const margin = manual ? MANUAL_COMPACT_SAFETY_MARGIN : Math.min(AUTO_COMPACT_SAFETY_MARGIN, Math.floor(contextWindow * 0.15));
-  return effectiveWindow - margin;
+  return contextWindow - (manual ? maxOutput : contextReserve(contextWindow, maxOutput));
 }
 
 export function estimateMessages(messages: readonly ConversationMessage[]): number {
@@ -60,9 +63,12 @@ export function currentContextTokens(
   conversation: Conversation,
   anchor: UsageAnchor | null,
 ): number {
-  if (anchor === null) return estimateTokens(conversation);
-  const messages = conversation.getMessages();
-  return anchor.baselineTokens + estimateMessages(messages.slice(anchor.anchorCount));
+  return calibratedContextTokens(conversation.getMessages(), anchor, anchor?.overheadTokens ?? 0, conversation.contextGeneration);
+}
+
+export function calibratedContextTokens(messages: readonly ConversationMessage[], anchor: UsageAnchor | null, overheadTokens = 0, generation?: number): number {
+  if (!anchor || anchor.anchorCount > messages.length || anchor.generation !== undefined && generation !== anchor.generation) return estimateMessages(messages) + overheadTokens;
+  return Math.max(0, anchor.baselineTokens + (anchor.overheadTokens === undefined ? 0 : overheadTokens - anchor.overheadTokens)) + estimateMessages(messages.slice(anchor.anchorCount));
 }
 
 export function computeKeepStartIndex(messages: readonly ConversationMessage[], tokenBudget = KEEP_MAX_TOKENS): number {
@@ -89,10 +95,16 @@ export async function doCompact(
   signal?: AbortSignal,
   sourceMessages?: readonly ConversationMessage[],
   targetTokens = 18_000,
+  metrics?: RunMetrics,
+  requestBudget?: { maxOutput: number; requestIdleTimeoutMs: number; trigger?: string },
 ): Promise<CompactResult> {
   const messages = sourceMessages ?? conversation.getMessages();
+  const span = metrics?.start("compaction", { beforeTokens: estimateMessages(messages), source: "message-estimate", trigger: requestBudget?.trigger ?? "automatic" });
+  let status: SpanStatus = "failed";
+  try {
   const keepStart = computeKeepStartIndex(messages, Math.max(512, Math.floor(targetTokens * 0.5)));
   if (keepStart < MIN_COMPACT_PREFIX) {
+    status = "skipped";
     return {
       compacted: false,
       message: `Compaction skipped: only ${keepStart} message(s) can be summarized safely.`,
@@ -101,12 +113,14 @@ export async function doCompact(
 
   const toSummarize = messages.slice(0, keepStart);
   const toKeep = messages.slice(keepStart);
-  const summary = await requestSummary(provider, toSummarize, signal);
+  const summary = await requestSummary(provider, toSummarize, signal, requestBudget, metrics);
   const recovery = recoveryState.buildRecoveryAttachment(toolSchemaNames, Math.min(4_000, Math.max(0, Math.floor(targetTokens * 0.2))));
   const summaryContent = buildSummaryContent(summary, toKeep.length, recovery);
   const candidate = new Conversation(); candidate.replaceWithCompacted(summaryContent, toKeep);
-  if (estimateTokens(candidate) >= estimateMessages(messages)) return { compacted: false, message: "压缩未减少上下文，保留原对话；请缩小读取范围或核对模型容量配置。" };
+  if (estimateTokens(candidate) >= estimateMessages(messages)) { status = "ineffective"; return { compacted: false, message: "压缩未减少上下文，保留原对话；请缩小读取范围或核对模型容量配置。" }; }
   conversation.replaceWithCompacted(summaryContent, toKeep);
+  status = "completed";
+  if (span) metrics?.end(span, status, { afterTokens: estimateTokens(conversation), keptMessages: toKeep.length, summaryChars: summary.length });
 
   return {
     compacted: true,
@@ -121,6 +135,8 @@ export async function doCompact(
       })),
     },
   };
+  } catch (error) { status = signal?.aborted ? "cancelled" : "failed"; throw error; }
+  finally { if (span) metrics?.end(span, status, { afterTokens: status === "completed" ? estimateTokens(conversation) : estimateMessages(messages), source: "message-estimate" }); }
 }
 
 export async function manageContext(
@@ -134,9 +150,12 @@ export async function manageContext(
   anchor: UsageAnchor | null = null,
   signal?: AbortSignal,
   budgetedMessages?: readonly ConversationMessage[],
+  metrics?: RunMetrics,
+  overheadTokens = 0,
+  requestIdleTimeoutMs = 120_000,
 ): Promise<CompactResult> {
   const messages = budgetedMessages ?? conversation.getMessages();
-  const tokens = anchor === null ? estimateMessages(messages) : anchor.baselineTokens + estimateMessages(messages.slice(anchor.anchorCount));
+  const tokens = calibratedContextTokens(messages, anchor, overheadTokens, conversation.contextGeneration);
   const autoThreshold = computeCompactThreshold(contextWindow, maxOutput);
   if (tokens < autoThreshold) return { compacted: false, message: "" };
 
@@ -153,7 +172,7 @@ export async function manageContext(
   }
 
   try {
-    const result = await doCompact(conversation, provider, recoveryState, toolSchemaNames, signal, messages, Math.max(1024, Math.floor(autoThreshold * 0.7)));
+    const result = await doCompact(conversation, provider, recoveryState, toolSchemaNames, signal, messages, Math.max(1024, Math.floor((autoThreshold - overheadTokens) * 0.7)), metrics, { maxOutput, requestIdleTimeoutMs });
     if (result.compacted) { tracking.consecutiveFailures = 0; tracking.lastCompactedTokens = estimateTokens(conversation); }
     else tracking.consecutiveFailures++;
     return result;
@@ -171,8 +190,12 @@ export function forceCompact(
   recoveryState: RecoveryState,
   toolSchemaNames: readonly string[],
   signal?: AbortSignal,
+  metrics?: RunMetrics,
+  budget?: EffectiveBudget,
+  sourceMessages?: readonly ConversationMessage[],
+  trigger = "manual",
 ): Promise<CompactResult> {
-  return doCompact(conversation, provider, recoveryState, toolSchemaNames, signal);
+  return doCompact(conversation, provider, recoveryState, toolSchemaNames, signal, sourceMessages, budget ? Math.max(1024, Math.floor(computeCompactThreshold(budget.contextWindow, budget.maxOutput) * 0.7)) : 18000, metrics, { maxOutput: budget?.maxOutput ?? 1024, requestIdleTimeoutMs: budget?.execution.requestIdleTimeoutMs ?? 120_000, trigger });
 }
 
 function backUpPastToolUse(messages: readonly ConversationMessage[], start: number): number {
@@ -209,13 +232,16 @@ async function requestSummary(
   provider: Provider,
   messages: readonly ConversationMessage[],
   external?: AbortSignal,
+  budget?: { maxOutput: number; requestIdleTimeoutMs: number },
+  metrics?: RunMetrics,
 ): Promise<string> {
   let response = "";
   const controller = new AbortController();
   const signal = external ? AbortSignal.any([external, controller.signal]) : controller.signal;
-  for await (const event of withIdleTimeout(provider.stream({
+  const observed = metrics ? measuredProvider(provider, metrics, "compaction", undefined, 1, { controller, milliseconds: budget?.requestIdleTimeoutMs ?? 120_000 }) : provider;
+  const stream = observed.stream({
     signal,
-    maxOutputTokens: 1024,
+    maxOutputTokens: Math.min(1024, budget?.maxOutput ?? 1024),
     systemPrompt: "You summarize prior conversation for a coding agent. Do not call tools.",
     messages: [{
       role: "user",
@@ -224,7 +250,8 @@ async function requestSummary(
         text: `Summarize this earlier conversation for the next agent turn in at most 600 words. Preserve the task goal, completed work, important decisions, changed files, unresolved issues, and next steps. Return only the summary; do not expand source files into a report.\n\n${serializeMessages(messages)}`,
       }],
     }],
-  }), 120_000, controller, signal)) {
+  });
+  for await (const event of metrics ? stream : withIdleTimeout(stream, budget?.requestIdleTimeoutMs ?? 120_000, controller, signal)) {
     if (event.type === "text_delta") response += event.text;
   }
   const summary = response.trim();

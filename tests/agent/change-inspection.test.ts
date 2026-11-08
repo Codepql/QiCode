@@ -33,7 +33,7 @@ describe("change inspection latency regressions", () => {
   });
   it("leaves useful headroom in a conservative 32k window", () => {
     expect(computeCompactThreshold(32768, 8192)).toBeGreaterThan(19000);
-    expect(computeCompactThreshold(200000, 8192)).toBe(178808);
+    expect(computeCompactThreshold(200000, 8192)).toBe(183616);
   });
   const requests: ChatRequest[] = [];
   const provider: Provider = { config: { name: "fake", protocol: "openai", model: "fake", api_key: "unused", base_url: "http://unused", thinking: false }, async *stream(request) { requests.push(request); yield { type: "text_delta", text: "brief summary" }; yield { type: "done" }; } };
@@ -52,13 +52,13 @@ describe("change inspection latency regressions", () => {
   });
   it("still compacts at the hard limit and bounds summary generation", async () => {
     requests.length = 0; const tracking = new AutoCompactTrackingState(); tracking.lastCompactedTokens = 24000;
-    const conversation = new Conversation(); for (let i = 0; i < 12; i++) conversation.addUserMessage("x".repeat(7000));
+    const conversation = new Conversation(); for (let i = 0; i < 12; i++) conversation.addUserMessage("x".repeat(7500));
     const result = await manageContext(conversation, provider, 32768, 8192, tracking, new RecoveryState(), []);
     expect(result.compacted).toBe(true); expect(requests).toHaveLength(1); expect(requests[0]!.maxOutputTokens).toBe(1024);
   });
   it("renders long table cells as labeled blocks rather than unaligned pipes", () => {
     const text = "## 提升\n\n| 功能 | 价值 |\n| --- | --- |\n| 恢复 | 长任务可继续 |";
-    const lines = layoutChat([{ role: "assistant", content: [{ type: "text", text }] }], "", [], 40);
+    const lines = layoutChat([{ role: "assistant", content: [{ type: "text", text }] }], "", [], 19);
     expect(lines.map((line) => line.text).join("\n")).toContain("功能：恢复\n价值：长任务可继续");
     expect(lines.some((line) => line.kind === "heading" && line.text === "提升")).toBe(true);
   });

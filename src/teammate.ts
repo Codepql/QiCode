@@ -2,6 +2,8 @@ import { FileMailbox } from "./teams/file-mailbox.js";
 import { saveTranscript } from "./teams/transcript.js";
 import { Conversation } from "./conversation/conversation.js";
 import { Agent } from "./agent/agent.js";
+import { resolveBudget } from "./agent/budgets.js";
+import { recordMetrics, endpointIdentity } from "./metrics/run-metrics.js";
 import { loadConfigLayers } from "./config/load-config.js";
 import { PermissionChecker } from "./permissions/checker.js";
 import { createToolRegistry, initializeAgentRuntime } from "./tui/runtime.js";
@@ -55,21 +57,18 @@ export async function runTeammate(args: TeammateArgs): Promise<void> {
 
   const runtime = await initializeAgentRuntime(providerConfig, workDir);
   const conversation = new Conversation();
-  const agent = new Agent({
-    provider: runtime.provider,
-    systemPrompt: runtime.systemPrompt,
-    conversation,
-    registry: createToolRegistry(),
-    workDir,
-    checker: new PermissionChecker(workDir, "acceptEdits"),
-  });
+  const budget = resolveBudget(providerConfig.model, config.model_capabilities, config.execution, {}, providerConfig.base_url);
   const mailbox = new FileMailbox(args.teamDir, args.memberName);
   const leadMailbox = new FileMailbox(args.teamDir, LEAD_NAME);
 
   try {
     let nextPrompt: string | null = args.initialTask;
     while (nextPrompt !== null) {
-      const result = await runTask(agent, conversation, nextPrompt);
+      conversation.addUserMessage(nextPrompt);
+      const metrics = recordMetrics(workDir, { model: providerConfig.model, protocol: providerConfig.protocol, contextWindow: budget.contextWindow, maxOutput: budget.maxOutput, budgetSource: budget.source, endpointId: endpointIdentity(providerConfig.base_url) });
+      const agent = new Agent({ budget, metrics, provider: runtime.provider, systemPrompt: runtime.systemPrompt, conversation,
+        registry: createToolRegistry(), workDir, checker: new PermissionChecker(workDir, "acceptEdits") });
+      const result = await runTask(agent);
       await leadMailbox.send(args.memberName, `[idle] ${args.memberName} completed a task:\n${truncate(result, 4_000)}`);
       saveTranscript(args.teamDir, args.memberName, conversation);
       nextPrompt = await waitForMessage(mailbox);
@@ -82,8 +81,7 @@ export async function runTeammate(args: TeammateArgs): Promise<void> {
   }
 }
 
-async function runTask(agent: Agent, conversation: Conversation, prompt: string): Promise<string> {
-  conversation.addUserMessage(prompt);
+async function runTask(agent: Agent): Promise<string> {
   let output = "";
   for await (const event of agent.run()) {
     if (event.type === "stream_text") {

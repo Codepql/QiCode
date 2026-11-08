@@ -53,7 +53,7 @@ describe("TUI layout", () => {
 
     expect(frame).toContain("1. JavaScript history");
     expect(frame).toContain("Background: Netscape");
-    expect(frame).toContain("* Second item");
+    expect(frame).toContain("• Second item");
     expect(frame).not.toContain("###");
     expect(frame).not.toContain("**");
     expect(frame).not.toContain("    *");
@@ -123,8 +123,8 @@ describe("TUI layout", () => {
     const view = render(
       <StatusBar mode="acceptEdits" />,
     );
-    expect(view.lastFrame()).toContain("Accept Edits on");
-    expect(view.lastFrame()).toContain("shift+tab to cycle");
+    expect(view.lastFrame()).toContain("自动编辑");
+    expect(view.lastFrame()).toContain("Ctrl+C 两次退出");
     view.unmount();
   });
 

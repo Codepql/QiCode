@@ -1,5 +1,6 @@
 import type { ConversationMessage } from "../conversation/types.js";
 import type { ProviderConfig } from "../config/types.js";
+import { resolveBudget } from "../agent/budgets.js";
 
 /** Anthropic signed thinking belongs to its original model; conversion is explicit. */
 export function modelHistoryIssue(messages: readonly ConversationMessage[], from: ProviderConfig, to: ProviderConfig): string | undefined {
@@ -16,5 +17,7 @@ export function withoutThinking(messages: readonly ConversationMessage[]): Conve
   return messages.map((message) => ({ ...message, content: message.content.filter((block) => block.type !== "thinking") })).filter((message) => message.content.length > 0);
 }
 export function modelChoiceDetail(config: ProviderConfig, capability?: { contextWindow: number; maxOutput: number }): string {
-  return `${config.name}\n模型：${config.model}\n协议：${config.protocol}\n思考：${config.thinking ? "开启（需端点支持）" : "关闭"}\n上下文容量：${capability?.contextWindow ?? "未知（运行时采用保守预算 32768）"}\n最大输出：${capability?.maxOutput ?? "未配置（默认 8192）"}\n切换保留可见对话；初始化失败保留原配置。切换初始化不发送 API 请求，端点兼容性在实际请求时验证。`;
+  const budget = resolveBudget(config.model, capability ? { [config.model]: capability } : {}, {}, {}, config.base_url);
+  const source = budget.source === "catalog" ? "官方模型资料" : budget.source === "configured" ? "显式配置" : "未知，采用保守预算";
+  return `${config.name}\n模型：${config.model}\n协议：${config.protocol}\n思考：${config.thinking ? "开启（需端点支持）" : "关闭"}\n上下文容量：${budget.contextWindow}（${source}）\n请求输出预算：${budget.maxOutput}\n切换保留可见对话；初始化失败保留原配置。切换初始化不发送 API 请求，端点兼容性在实际请求时验证。`;
 }

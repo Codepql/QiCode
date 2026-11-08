@@ -20,6 +20,14 @@ import type { ConversationMessage } from "../../src/conversation/types.js";
 const config = { name: "fake", protocol: "openai" as const, model: "fake", api_key: "unused", base_url: "http://unused", thinking: false };
 const workspace = () => mkdtempSync(join(tmpdir(), "qicode-task-approval-"));
 describe("task approvals and ineffective compaction", () => {
+  it("makes Enter approve ordinary steps for the task, while Y stays single-use", async () => {
+    const complete = vi.fn();
+    const view = render(<PermissionDialog toolName="Bash" argsSummary="node task.js" reason="Mode: default" allowTask onComplete={complete} />);
+    expect(view.lastFrame()).toContain("Enter/T 批准本任务"); view.stdin.write("\r");
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledWith("allowTask")); view.unmount();
+    const once = vi.fn(); const single = render(<PermissionDialog toolName="Bash" argsSummary="node task.js" reason="Mode: default" allowTask onComplete={once} />);
+    single.stdin.write("y"); await vi.waitFor(() => expect(once).toHaveBeenCalledWith("allow")); single.unmount();
+  });
   it("grants ordinary steps once per task and keeps remote operations and hard denies separate", async () => {
     const steps = ["node one.js", "node two.js", "git push", "rm -rf /"];
     const executed: string[] = []; const registry = new ToolRegistry();
@@ -67,7 +75,7 @@ describe("task approvals and ineffective compaction", () => {
   });
   it("does not replace history with a larger summary and stops after three ineffective attempts", async () => {
     let calls = 0; const provider: Provider = { config, async *stream() { calls++; yield { type: "text_delta", text: "x".repeat(100000) }; yield { type: "done" }; } };
-    const conversation = new Conversation(); for (let i = 0; i < 12; i++) conversation.addUserMessage("x".repeat(7000));
+    const conversation = new Conversation(); for (let i = 0; i < 12; i++) conversation.addUserMessage("x".repeat(7500));
     const before = conversation.getMessages(); const tracking = new AutoCompactTrackingState();
     for (let attempt = 0; attempt < 3; attempt++) expect((await manageContext(conversation, provider, 32768, 8192, tracking, new RecoveryState(), [])).compacted).toBe(false);
     expect((await manageContext(conversation, provider, 32768, 8192, tracking, new RecoveryState(), [])).blocked).toBe(true);

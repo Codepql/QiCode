@@ -2,6 +2,7 @@ import { Box, Text } from "ink";
 import { useRoutedInput } from "./input-router.js";
 import { useState } from "react";
 import type { ProviderConfig } from "../config/types.js";
+import { theme } from "./theme.js";
 
 export interface ProviderSelectProps {
   providers: readonly ProviderConfig[];
@@ -25,13 +26,13 @@ export function ProviderSelect({ providers, onSelect }: ProviderSelectProps) {
   });
 
   if (providers.length === 0) {
-    return <Text color="yellow">No providers configured.</Text>;
+    return <Text color={theme.warning}>尚未配置模型，请先检查配置文件。</Text>;
   }
 
   return (
     <Box flexDirection="column">
-      <Text bold>Select a provider</Text>
-      <Text dimColor>Use ↑/↓ and Enter</Text>
+      <Text bold color={theme.brand}>选择模型</Text>
+      <Text dimColor>↑↓ 选择 · Enter 开始</Text>
       <Box flexDirection="column" marginTop={1}>
         {providers.map((provider, index) => (
           <Text

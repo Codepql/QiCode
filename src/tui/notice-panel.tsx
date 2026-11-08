@@ -3,11 +3,15 @@ import { useEffect, useState } from "react";
 import { useRoutedInput } from "./input-router.js";
 import { sanitizeTerminalText } from "./sanitize-terminal.js";
 import { wrapRows } from "./text-layout.js";
+import { theme } from "./theme.js";
 
 export function NoticePanel({ notices, columns, maxHeight, active = true, onExpandedChange }: { notices: readonly string[]; columns: number; maxHeight: number; active?: boolean; onExpandedChange?(open: boolean): void }) {
   const [expanded, setExpanded] = useState(false);
   const [offset, setOffset] = useState(0);
-  const lines = notices.filter(Boolean).flatMap((notice) => wrapRows(sanitizeTerminalText(notice), Math.max(1, columns - 1)));
+  const lines = notices.filter(Boolean).flatMap((notice) => {
+    const color = /错误|失败|Error|failed/i.test(notice) ? theme.danger : /警告|受阻|未验证|超限|warning/i.test(notice) ? theme.warning : theme.muted;
+    return wrapRows(sanitizeTerminalText(notice), Math.max(1, columns - 1)).map((line) => ({ ...line, color }));
+  });
   const limit = expanded ? Math.max(1, maxHeight - 1) : Math.min(2, Math.max(1, maxHeight - 1));
   useEffect(() => { if (!lines.length) setExpanded(false); }, [lines.length]);
   useEffect(() => { onExpandedChange?.(active && expanded && lines.length > 0); }, [active, expanded, lines.length, onExpandedChange]);
@@ -22,7 +26,7 @@ export function NoticePanel({ notices, columns, maxHeight, active = true, onExpa
   if (!lines.length || !active) return null;
   const top = expanded ? Math.max(0, Math.min(offset, lines.length - limit)) : 0;
   return <Box flexDirection="column" flexShrink={0}>
-    {lines.slice(top, top + limit).map((line, index) => <Text key={index} color="yellow" wrap="truncate-end">{line.text || " "}</Text>)}
+    {lines.slice(top, top + limit).map((line, index) => <Text key={index} color={line.color} wrap="truncate-end">{line.text || " "}</Text>)}
     {lines.length > limit && <Text dimColor wrap="truncate-end">Ctrl+N {expanded ? "收起 · PgUp/PgDn 浏览" : `查看完整通知（${lines.length} 行）`}</Text>}
   </Box>;
 }

@@ -1,5 +1,6 @@
 import type { ProviderConfig } from "../config/types.js";
 import type { ModelCapabilities } from "../agent/execution.js";
+import { resolveBudget } from "../agent/budgets.js";
 import { createProvider, type Provider } from "../llm/client.js";
 import { buildSystemPrompt, detectEnvironment } from "../prompt/builder.js";
 import type { EnvironmentContext } from "../prompt/sections.js";
@@ -95,5 +96,5 @@ export function createToolRegistry(): ToolRegistry {
 }
 
 export function contextWindowFor(config: ProviderConfig, capabilities: Record<string, ModelCapabilities> = {}): number {
-  return capabilities[config.model]?.contextWindow ?? 32_768;
+  return resolveBudget(config.model, capabilities, {}, {}, config.base_url).contextWindow;
 }

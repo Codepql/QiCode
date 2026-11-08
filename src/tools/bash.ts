@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { readOnlyGitCommand } from "../permissions/git-readonly.js";
+import { prepareSafeCommand } from "../permissions/checker.js";
 import { join } from "node:path";
 import { resolveShell, shellArgs } from "./shell.js";
 import { BashDescription } from "./descriptions.js";
@@ -127,7 +127,7 @@ export class BashTool implements Tool {
       let quotaExceeded = false;
       let updateTimer: ReturnType<typeof setTimeout> | undefined;
       let killTimer: ReturnType<typeof setTimeout> | undefined;
-      const child = spawn(shell.file, shellArgs(shell, readOnlyGitCommand(command) ?? command), {
+      const child = spawn(shell.file, shellArgs(shell, prepareSafeCommand(command) ?? command), {
         cwd: ctx.workDir, stdio: ["ignore", "pipe", "pipe"], shell: false,
         env: { ...process.env, ...ctx.environment }, detached: process.platform !== "win32",
         windowsHide: true, windowsVerbatimArguments: shell.kind === "cmd",
