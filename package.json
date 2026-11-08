@@ -1,6 +1,6 @@
 {
   "name": "@coderpql/qicode",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A terminal-first AI coding assistant.",
   "type": "module",
   "private": false,
