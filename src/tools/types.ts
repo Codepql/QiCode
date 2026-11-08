@@ -16,6 +16,7 @@ export interface ToolMetadata {
   filePath?: string;
   firstChangedLine?: number;
   diff?: string;
+  read?: { version: string; startLine: number; endLine: number; totalLines: number };
 }
 
 export interface ToolContext {

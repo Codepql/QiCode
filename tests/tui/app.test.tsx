@@ -23,6 +23,15 @@ const providerConfig: ProviderConfig = {
 };
 
 describe("App", () => {
+  it("answers /stats locally without a model request or losing the cat logo", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-stats-ui-")); const requests: ChatRequest[] = [];
+    const runtimeFactory = vi.fn(async () => ({ provider: fakeProvider(requests), systemPrompt: "test" }));
+    const view = render(<App providers={[providerConfig]} workDir={workDir} runtimeFactory={runtimeFactory} />);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    view.stdin.write("/stats"); await waitFor(() => (view.lastFrame() ?? "").includes("/stats")); view.stdin.write("\r");
+    await waitFor(() => (view.lastFrame() ?? "").includes("暂无性能记录"));
+    expect(requests).toHaveLength(0); expect(view.lastFrame()).toContain("( o.o )"); view.unmount();
+  });
   it("keeps a fork result between the parent messages that happened before and after it", () => {
     const message = (text: string): ConversationMessage => ({
       role: "assistant",

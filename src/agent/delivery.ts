@@ -62,7 +62,9 @@ export class TaskDelivery {
     const checks = await projectChecks(this.workDir);
     return this.toolCount === 0
       ? "用户提出的是执行请求。当前还没有仓库操作证据，请使用工具实际处理，或明确说明为何无需修改/无法执行。不要仅提供建议。"
-      : `当前改动尚无最新版本的通过记录。请执行相关检查，失败后继续修复；若确实无法验证请明确阻塞原因。${checks.length ? `项目已有入口：${checks.join("；")}。命令执行仍须通过权限检查。` : "未发现项目检查脚本，使用适当的轻量检查或说明限制，不要自动安装依赖。"}`;
+      : latest?.status === "failed"
+        ? "当前验证仍有失败，请针对实际错误修复；需要复核时只运行相关检查，遵守用户限制，无法完成时说明原因。"
+        : `当前改动没有最新版本的验证通过记录。按任务风险决定是否验证：简单、低风险改动可直接交付并注明未验证，不因此视为阻塞，也不要为消除未验证标记运行检查。只有用户要求或关键行为风险需要时才执行最小相关检查。${checks.length ? `确有需要时可用项目已有入口：${checks.join("；")}。` : "不要自动安装依赖。"}`;
   }
   report(forced?: DeliveryStatus): DeliveryReport {
     const latest = this.verifications.at(-1);

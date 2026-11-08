@@ -281,6 +281,7 @@ export function createDefaultRegistry(): CommandRegistry {
     ["settings", "偏好设置与按键配置"],
     ["hotkeys", "查看当前有效快捷键"],
     ["tasks", "查看任务、日志与单项取消"],
+    ["stats", "查看本地任务耗时、压缩与用量；/stats list 查看历史"],
     ["files", "搜索并引用工作区文件；/files remove <序号> 移除"],
   ] as const) registry.register({ name, aliases: [], type: "local_ui", description, handler: () => name });
 

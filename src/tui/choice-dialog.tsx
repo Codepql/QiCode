@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import { useRoutedInput } from "./input-router.js";
 import { sanitizeTerminalText } from "./sanitize-terminal.js";
 import { truncateCells, wrapRows } from "./text-layout.js";
+import { theme } from "./theme.js";
 
 export interface Choice { id: string; label: string; detail?: string; search?: string }
 export interface ChoiceDialogProps {
@@ -46,10 +47,10 @@ export function ChoiceDialog({ title, items, columns, maxHeight, hint, onSelect,
   const top = Math.max(0, Math.min(offset, lines.length - height));
   const first = Math.max(0, index - height + 1);
   return <Box flexDirection="column" width={width} flexShrink={0}>
-    <Text color="cyan" bold wrap="truncate-end">{title}{preview ? " · 预览" : ` · ${filtered.length}/${items.length}`}</Text>
-    {!preview && <Text wrap="truncate-end">搜索：{sanitizeTerminalText(query) || "输入关键词"}</Text>}
+    <Text color={theme.brand} bold wrap="truncate-end">{title}<Text dimColor>{preview ? " · 预览" : ` · ${filtered.length}/${items.length}`}</Text></Text>
+    {!preview && <Text wrap="truncate-end"><Text color={theme.accent}>搜索 </Text>{sanitizeTerminalText(query) || <Text dimColor>输入关键词</Text>}</Text>}
     {preview ? lines.slice(top, top + height).map((line, i) => <Text key={i} wrap="truncate-end">{line.text || " "}</Text>)
-      : !filtered.length ? <Text dimColor>没有匹配项</Text> : filtered.slice(first, first + height).map((item) => <Text key={item.id} inverse={item.id === selected?.id} wrap="truncate-end">{truncateCells(sanitizeTerminalText(item.label), width)}</Text>)}
+      : !filtered.length ? <Text dimColor>没有匹配项</Text> : filtered.slice(first, first + height).map((item) => <Text key={item.id} {...(item.id === selected?.id ? { color: theme.accent } : {})} inverse={item.id === selected?.id} wrap="truncate-end">{truncateCells(`${item.id === selected?.id ? "› " : "  "}${sanitizeTerminalText(item.label)}`, width)}</Text>)}
     <Text dimColor wrap="truncate-end">{preview ? "↑↓/PgUp/PgDn 滚动 · Enter 选择 · Esc 返回" : hint ?? "↑↓ 选择 · Tab 预览 · Enter 确认 · Esc 返回"}</Text>
   </Box>;
 }

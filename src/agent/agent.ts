@@ -1,8 +1,13 @@
-import { dirname, resolve } from "node:path";
-import { createHash } from "node:crypto";
+import { dirname, relative, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { resolveBudget, type EffectiveBudget } from "./budgets.js";
+import { RunMetrics, type ReadEvidence } from "../metrics/run-metrics.js";
+import { measuredProvider } from "../metrics/provider.js";
 import { discoverInstructions } from "../memory/instructions.js";
 import {
   AutoCompactTrackingState,
+  estimateMessages,
+  calibratedContextTokens,
   forceCompact,
   manageContext,
   type UsageAnchor,
@@ -43,7 +48,7 @@ import type { HookActionExecutor, HookContext } from "../hooks/types.js";
 import { fetchSafeText } from "../security/safe-fetch.js";
 import { StreamingExecutor } from "./streaming-executor.js";
 import type { AgentEvent } from "./events.js";
-import { DEFAULT_EXECUTION, TaskBudget, abortableDelay, withIdleTimeout, type ExecutionSettings } from "./execution.js";
+import { DEFAULT_EXECUTION, ApprovalClock, TaskBudget, awaitWithSignal, abortableDelay, withIdleTimeout, type ExecutionSettings } from "./execution.js";
 import { TaskDelivery } from "./delivery.js";
 import { inspectionReminder, inspectionRequestsChecks } from "./task-intent.js";
 import { taskApprovalEligible } from "../permissions/task-approval.js";
@@ -55,6 +60,10 @@ export const MAX_TOOL_OUTPUT_CHARS = 10_000;
 const MAX_CONSECUTIVE_UNKNOWN_TOOL_TURNS = 3;
 
 export interface AgentConfig {
+  metrics?: RunMetrics;
+  finishMetrics?: boolean;
+  budget?: EffectiveBudget;
+  approvalClock?: ApprovalClock;
   provider: Provider;
   registry: ToolRegistry;
   conversation: Conversation;
@@ -81,10 +90,14 @@ export interface AgentConfig {
     toolName: string,
     args: Record<string, unknown>,
     decision: Decision,
+    signal?: AbortSignal,
   ) => Promise<PermissionResponse>;
 }
 
 export class Agent {
+  readonly metrics: RunMetrics;
+  readonly effectiveBudget: EffectiveBudget;
+  readonly #readEvidence = new Map<string, ReadEvidence[]>();
   readonly #readFiles = new Set<string>();
   readonly #fileVersions = new Map<string, string | null>();
   readonly #checker: PermissionChecker;
@@ -105,16 +118,20 @@ export class Agent {
   readonly #failureCounts = new Map<string, number>();
   readonly #uncertainOperations = new Set<string>();
   #taskApproved = false;
+  readonly approvalClock: ApprovalClock;
 
   constructor(private readonly config: AgentConfig) {
     this.#checker = config.checker;
+    this.approvalClock = config.approvalClock ?? new ApprovalClock();
     this.#onPermissionRequest = config.onPermissionRequest;
     this.#recoveryState = config.recoveryState ?? new RecoveryState();
     this.#replacementState = config.replacementState ?? new ContentReplacementState();
     this.#activeSkills = config.activeSkills ?? new Map();
     this.#toolFilter = config.toolFilter;
     this.#hookActionExecutor = this.createHookActionExecutor();
-    this.#settings = { ...DEFAULT_EXECUTION, ...config.execution };
+    this.effectiveBudget = config.budget ?? resolveBudget(config.provider.config.model, {}, config.execution, { ...(config.contextWindow === undefined ? {} : { contextWindow: config.contextWindow }), ...(config.maxOutput === undefined ? {} : { maxOutput: config.maxOutput }) }, config.provider.config.base_url);
+    this.#settings = this.effectiveBudget.execution;
+    this.metrics = config.metrics ?? new RunMetrics({ model: config.provider.config.model, protocol: config.provider.config.protocol, contextWindow: this.effectiveBudget.contextWindow, maxOutput: this.effectiveBudget.maxOutput, budgetSource: this.effectiveBudget.source });
     this.#signal = config.abortSignal ?? new AbortController().signal;
     const prompt = config.conversation.getMessages().filter((message) => message.role === "user" && !Conversation.visibleText(message).startsWith("<system-reminder>")).at(-1);
     this.#delivery = new TaskDelivery(prompt ? Conversation.visibleText(prompt) : "", config.workDir, config.checker.mode === "plan");
@@ -126,10 +143,26 @@ export class Agent {
         const call = calls.get(block.toolUseId);
         if (call) this.#uncertainOperations.add(JSON.stringify([call.name, call.input]));
       }
+      if (block.type === "tool_result" && block.evidence) {
+        const path = resolve(config.workDir, block.evidence.path);
+        const previous = this.#readEvidence.get(path) ?? [];
+        previous.push({ ...block.evidence, toolId: block.toolUseId, kind: "new" }); this.#readEvidence.set(path, previous);
+        this.#recoveryState.recordFileRead(path, block.content, block.evidence);
+      }
     }
   }
 
   async *run(): AsyncGenerator<AgentEvent> {
+    try {
+      for await (const event of this.runLoop()) {
+        if (event.type === "loop_complete") this.metrics.outcome = event.stopReason ?? "completed";
+        yield event;
+      }
+    } catch (error) { this.metrics.outcome = this.#budget?.controller.signal.aborted ? "task_timeout" : this.#signal.aborted ? "interrupted" : "error"; throw error; }
+    finally { if (this.config.finishMetrics !== false) this.metrics.finish(); }
+  }
+
+  private async *runLoop(): AsyncGenerator<AgentEvent> {
     this.#taskApproved = false;
     const maxIterations = this.config.maxIterations ?? this.#settings.maxIterations;
     const checker = this.#checker;
@@ -138,6 +171,8 @@ export class Agent {
     let truncations = 0;
     this.#budget = new TaskBudget(this.#settings.taskTimeoutMs, this.config.abortSignal);
     this.#signal = this.#budget.signal;
+    let sharedApproval: string | undefined;
+    const detachApproval = this.approvalClock.attach(this.#budget, () => { sharedApproval = this.metrics.start("permission", { source: "shared_wait" }); }, () => { if (sharedApproval) this.metrics.end(sharedApproval); sharedApproval = undefined; });
 
     try {
       if (this.config.trackDelivery) await this.#delivery.initialize();
@@ -154,14 +189,17 @@ export class Agent {
       const compactResult = await manageContext(
         this.config.conversation,
         this.config.provider,
-        this.config.contextWindow ?? 200_000,
-        this.config.maxOutput ?? 8_192,
+        this.effectiveBudget.contextWindow,
+        this.effectiveBudget.maxOutput,
         this.#compactTracking,
         this.#recoveryState,
         this.config.registry.listTools().map((tool) => tool.name),
         this.#usageAnchor,
         this.#signal,
-        applyBudget(this.config.conversation.getMessages(), this.config.workDir, this.#replacementState, toolOutputBudget(this.config.contextWindow ?? 200_000, this.config.maxOutput ?? 8192)),
+        applyBudget(this.config.conversation.getMessages(), this.config.workDir, this.#replacementState, toolOutputBudget(this.effectiveBudget.contextWindow, this.effectiveBudget.maxOutput)),
+        this.metrics,
+        Math.ceil((this.config.systemPrompt.length + JSON.stringify(toolDefinitions(this.config.registry, checker, this.#toolFilter)).length) / 3.5),
+        this.#settings.requestIdleTimeoutMs,
       );
       if (compactResult.message !== "") {
         yield {
@@ -214,6 +252,10 @@ export class Agent {
             this.#recoveryState,
             this.config.registry.listTools().map((tool) => tool.name),
             this.#signal,
+            this.metrics,
+            this.effectiveBudget,
+            applyBudget(this.config.conversation.getMessages(), this.config.workDir, this.#replacementState, toolOutputBudget(this.effectiveBudget.contextWindow, this.effectiveBudget.maxOutput)),
+            "context-recovery",
           );
           this.#usageAnchor = null;
           yield {
@@ -314,6 +356,7 @@ export class Agent {
       if (this.config.trackDelivery) yield { type: "delivery", report: this.#delivery.report("budget_exhausted") };
       yield { type: "loop_complete", stopReason: "max_iterations" };
     } finally {
+      detachApproval();
       this.#budget.dispose();
       await this.fireHook("session_end");
     }
@@ -341,19 +384,30 @@ export class Agent {
         .map((reminder) => Conversation.systemReminderMessage(reminder)),
     ];
     const apiConversation = buildConversation(
-      applyBudget(requestMessages, this.config.workDir, this.#replacementState, toolOutputBudget(this.config.contextWindow ?? 200_000, this.config.maxOutput ?? 8192)),
+      applyBudget(requestMessages, this.config.workDir, this.#replacementState, toolOutputBudget(this.effectiveBudget.contextWindow, this.effectiveBudget.maxOutput)),
     );
     const sentMessageCount = messages.length;
+    const sentGeneration = this.config.conversation.contextGeneration;
+    const overheadTokens = Math.ceil((this.config.systemPrompt.length + JSON.stringify(tools).length) / 3.5) + estimateMessages(requestMessages.slice(sentMessageCount));
+    const estimatedInput = calibratedContextTokens(apiConversation.getMessages().slice(0, sentMessageCount), this.#usageAnchor, overheadTokens, this.config.conversation.contextGeneration);
+    if (estimatedInput + this.effectiveBudget.maxOutput >= this.effectiveBudget.contextWindow) return "context_too_long";
+    const requestId = randomUUID();
     for (let attempt = 0; ; attempt++) {
+      const requestInput: { inputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number } = {};
       const requestController = new AbortController();
       const signal = AbortSignal.any([this.#signal, requestController.signal]);
       try {
-        const stream = this.config.provider.stream({
-          maxOutputTokens: this.config.maxOutput ?? 8192,
+        const stream = measuredProvider(this.config.provider, this.metrics, "main", requestId, attempt + 1, { controller: requestController, milliseconds: this.#settings.requestIdleTimeoutMs }).stream({
+          maxOutputTokens: this.effectiveBudget.maxOutput,
           systemPrompt: this.config.systemPrompt, messages: apiConversation.getMessages(),
           ...(tools.length === 0 ? {} : { tools }), signal,
         });
-        for await (const event of withIdleTimeout(stream, this.#settings.requestIdleTimeoutMs, requestController, signal)) {
+        for await (const event of stream) {
+          if (event.type === "usage") {
+            for (const key of ["inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] as const) if (event[key] !== undefined && Number.isFinite(event[key]) && event[key]! >= 0) requestInput[key] = Math.max(requestInput[key] ?? 0, event[key]!);
+            const total = (requestInput.inputTokens ?? 0) + (requestInput.cacheReadInputTokens ?? 0) + (requestInput.cacheCreationInputTokens ?? 0);
+            if (total > 0) this.#usageAnchor = { baselineTokens: total, anchorCount: sentMessageCount, overheadTokens, generation: sentGeneration };
+          }
           for (const agentEvent of this.recordEvent(response, event, sentMessageCount)) yield agentEvent;
         }
         if (!response.terminal) throw new StreamProtocolError("模型流缺少正常终止事件");
@@ -370,7 +424,9 @@ export class Agent {
           yield { type: "stream_reset" };
           response.text = ""; response.toolUses = []; response.thinking = []; response.terminal = false;
           delete response.stopReason;
-          try { await abortableDelay(delayMs, this.#signal); } catch { return "failed"; }
+          const backoff = this.metrics.start("backoff", { requestId, attempt: attempt + 1 });
+          try { await abortableDelay(delayMs, this.#signal); this.metrics.end(backoff); }
+          catch { this.metrics.end(backoff, "cancelled"); return "failed"; }
           continue;
         }
         const message = this.#budget?.controller.signal.aborted ? "任务执行预算已用尽。"
@@ -417,12 +473,6 @@ export class Agent {
           args: event.arguments,
         }];
       case "usage":
-        if (event.inputTokens !== undefined || (event.cacheReadInputTokens ?? 0) > 0 || (event.cacheCreationInputTokens ?? 0) > 0) this.#usageAnchor = {
-          baselineTokens: (event.inputTokens ?? 0)
-            + (event.cacheReadInputTokens ?? 0)
-            + (event.cacheCreationInputTokens ?? 0),
-          anchorCount: sentMessageCount,
-        };
         return [{
           type: "usage",
           ...(event.inputTokens === undefined ? {} : { inputTokens: event.inputTokens }),
@@ -470,6 +520,7 @@ export class Agent {
       content: result.result.output,
       isError: result.result.isError,
       ...(result.result.metadata?.status === "unknown" ? { executionState: "unknown" as const } : {}),
+      ...(result.result.metadata?.read && result.result.metadata.filePath ? { evidence: { path: relative(this.config.workDir, result.result.metadata.filePath).replaceAll("\\", "/"), ...result.result.metadata.read } } : {}),
     }));
     this.config.conversation.addToolResultsMessage(resultBlocks);
 
@@ -505,6 +556,7 @@ export class Agent {
     checker: PermissionChecker,
     emit: (event: AgentEvent) => void,
   ): Promise<ToolExecution[]> {
+    const metricTools = new Map<string, string>();
     const executor = new StreamingExecutor(this.config.registry, {
       workDir: this.config.workDir,
       readFiles: this.#readFiles,
@@ -516,10 +568,16 @@ export class Agent {
       maxLogBytes: this.#settings.toolOutputDiskLimitBytes,
       onToolStart: (toolId, toolName, args) => {
         this.config.onToolStart?.(toolId, toolName, args);
+        metricTools.set(toolId, this.metrics.start("tool", { toolId, toolName }));
         emit({ type: "tool_start", toolId, toolName, args });
       },
       onToolUpdate: (toolId, toolName, output) => emit({ type: "tool_update", toolId, toolName, output }),
-      onToolEnd: (toolId, toolName, result) => this.config.onToolEnd?.(toolId, toolName, result),
+      onToolEnd: (toolId, toolName, result) => {
+        const status = result.metadata?.status === "cancelled" ? "cancelled" as const : result.metadata?.status === "timeout" ? "timeout" as const : result.isError ? "failed" as const : "completed" as const;
+        try { this.config.onToolEnd?.(toolId, toolName, result); }
+        catch (error) { const span = metricTools.get(toolId); if (span) this.metrics.end(span, "unknown"); throw error; }
+        finally { const span = metricTools.get(toolId); if (span) this.metrics.end(span, status); }
+      },
     });
     const executions = new Map<string, ToolExecution>();
 
@@ -608,14 +666,16 @@ export class Agent {
           });
           continue;
         }
-        this.#budget?.pause();
-        let response: PermissionResponse;
-        try { response = await this.#onPermissionRequest(
+        const finishWaiting = this.approvalClock.enter();
+        const approval = this.metrics.start("permission", { toolName: toolUse.name, toolId: toolUse.id, source: uncertain ? "unknown_effect" : decision.reason === "Permission rule: ask" ? "rule" : "mode" });
+        let response: PermissionResponse | undefined;
+        try { response = await awaitWithSignal(this.#onPermissionRequest(
           toolUse.name,
           toolUse.input,
           decision,
-        ); } finally { this.#budget?.resume(); }
-        if (response === "deny") {
+          this.#signal,
+        ), this.#signal); } finally { finishWaiting(); this.metrics.end(approval, this.#signal.aborted ? "cancelled" : response === undefined ? "failed" : "completed", response ? { decision: response } : {}); }
+        if (!response || response === "deny") {
           executions.set(toolUse.id, {
             toolId: toolUse.id,
             toolName: toolUse.name,
@@ -727,7 +787,12 @@ export class Agent {
     if (this.#onPermissionRequest === undefined) {
       return { output: `Permission denied: ${decision.reason}`, isError: true };
     }
-    const response = await this.#onPermissionRequest(toolName, args, decision);
+    const approval = this.metrics.start("permission", { toolName, source: "hook" });
+    const finishWaiting = this.approvalClock.enter();
+    let response: PermissionResponse | undefined;
+    try { response = await awaitWithSignal(this.#onPermissionRequest(toolName, args, decision, this.#signal), this.#signal); }
+    finally { finishWaiting(); this.metrics.end(approval, this.#signal.aborted ? "cancelled" : response === undefined ? "failed" : "completed", response ? { decision: response } : {}); }
+    if (!response) return { output: "Permission denied: no approval result", isError: true };
     if (response === "deny") return { output: "Permission denied by user", isError: true };
     if (response === "allowAlways") this.#checker.allowAlways(toolName, args);
     return undefined;
@@ -754,7 +819,17 @@ export class Agent {
       try {
         const absolutePath = resolve(this.config.workDir, filePath);
         const result = results.find((result) => result.toolId === toolUse.id);
-        if (result) this.#recoveryState.recordFileRead(absolutePath, result.result.output);
+        if (result) {
+          const read = result.result.metadata?.read;
+          if (read) {
+            const previous = this.#readEvidence.get(absolutePath) ?? [];
+            const same = previous.filter((entry) => entry.version === read.version);
+            const kind = previous.length && previous.at(-1)?.version !== read.version ? "changed" : same.some((entry) => entry.startLine <= read.startLine && entry.endLine >= read.endLine) ? "repeat" : same.some((entry) => entry.endLine >= read.startLine && entry.startLine <= read.endLine) ? "overlap" : "new";
+            const evidence: ReadEvidence = { path: relative(this.config.workDir, absolutePath).replaceAll("\\", "/"), ...read, toolId: toolUse.id, kind };
+            this.metrics.read(evidence); this.#readEvidence.set(absolutePath, [...(kind === "changed" ? [] : previous), evidence].slice(-128));
+          }
+          this.#recoveryState.recordFileRead(absolutePath, result.result.output, read);
+        }
       } catch {
         // Recovery is optional and must never replace the actual tool result.
       }

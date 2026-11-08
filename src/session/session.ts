@@ -347,7 +347,10 @@ function isConversationBlock(value: unknown): value is ConversationBlock {
   return value.type === "tool_result"
     && typeof value.toolUseId === "string"
     && typeof value.content === "string"
-    && typeof value.isError === "boolean";
+    && typeof value.isError === "boolean"
+    && (value.evidence === undefined || isRecord(value.evidence) && typeof value.evidence.path === "string" && typeof value.evidence.version === "string"
+      && [value.evidence.startLine, value.evidence.endLine, value.evidence.totalLines].every((amount) => Number.isSafeInteger(amount) && Number(amount) >= 0)
+      && Number(value.evidence.startLine) <= Number(value.evidence.endLine) && Number(value.evidence.endLine) <= Number(value.evidence.totalLines));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

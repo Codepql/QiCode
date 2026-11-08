@@ -23,6 +23,7 @@ export interface ToolResultBlock {
   content: string;
   isError: boolean;
   executionState?: "unknown" | "not_executed";
+  evidence?: { path: string; version: string; startLine: number; endLine: number; totalLines: number };
 }
 
 export type ConversationBlock =

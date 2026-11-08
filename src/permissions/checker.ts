@@ -137,6 +137,7 @@ const DANGEROUS_PATTERNS: DangerousPattern[] = [
  */
 const SAFE_PREFIXES: string[] = [
   "ls",
+  "dir",
   "pwd",
   "echo",
   "cat",
@@ -160,6 +161,17 @@ const UNSAFE_METACHARACTERS = [">", "<", "|", ";", "&", "$", "`", "%", "!", "^",
  * 再与安全前缀做「完全相等 / 前缀 + 空格 / 前缀 + 制表符」匹配。
  */
 export function isSafeCommand(command: string): boolean {
+  return prepareSafeCommand(command) !== undefined;
+}
+
+/** Permission evaluation and actual execution share the same bounded AND-chain policy. */
+export function prepareSafeCommand(command: string): string | undefined {
+  const parts = command.split("&&");
+  if (parts.length > 8 || !parts.every(isSafeSimpleCommand)) return;
+  return parts.map((part) => readOnlyGitCommand(part) ?? part.trim()).join(" && ");
+}
+
+function isSafeSimpleCommand(command: string): boolean {
   const trimmed = command.trim();
   if (trimmed === "") return false;
   if (/[\x00-\x08\x0a-\x1f\x7f]/.test(trimmed)) return false;
@@ -402,13 +414,14 @@ export class PermissionChecker {
 
     // Every explicit deny wins over automatic, session, permanent and plan allowances.
     const ruleEffect = this.#ruleEngine.evaluate(toolName, content);
-    if (ruleEffect === "deny") return { effect: "deny", reason: "Permission rule: deny" };
+    const safeCommand = category === "command" && isSafeCommand(content);
+    if (ruleEffect === "deny" || safeCommand && content.includes("&&") && content.split("&&").some((part) => this.#ruleEngine.evaluate(toolName, part.trim()) === "deny")) return { effect: "deny", reason: "Permission rule: deny" };
 
     if (this.mode === "plan" && (toolName === "WriteFile" || toolName === "EditFile")
       && this.#isPlanFilePath(String(args.file_path ?? ""))) {
       return { effect: "allow", reason: "Plan file write allowed in plan mode" };
     }
-    if (category === "command" && isSafeCommand(content)) {
+    if (safeCommand) {
       return { effect: "allow", reason: "Safe read-only command" };
     }
 

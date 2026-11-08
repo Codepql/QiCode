@@ -1,8 +1,14 @@
 import { Box, Text, useApp, useWindowSize } from "ink";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DEFAULT_EXECUTION, type ExecutionSettings, type ModelCapabilities } from "../agent/execution.js";
+import { DEFAULT_EXECUTION, ApprovalClock, awaitWithSignal, type ExecutionSettings, type ModelCapabilities } from "../agent/execution.js";
 import { isChangeInspection } from "../agent/task-intent.js";
 import { taskApprovalEligible } from "../permissions/task-approval.js";
+import { resolveBudget } from "../agent/budgets.js";
+import { endpointIdentity, formatMetrics, listMetrics, loadMetrics, recordMetrics, type RunMetrics } from "../metrics/run-metrics.js";
+import { applyBudget, toolOutputBudget } from "../toolresult/budget.js";
+import { ContentReplacementState } from "../toolresult/state.js";
+import { auxiliaryProvider } from "../metrics/provider.js";
+import { ApprovalQueue } from "./approval-queue.js";
 import { runSession, SessionPersistenceError } from "../session/run-session.js";
 import { estimateMessages, forceCompact } from "../compact/compact.js";
 import { inspectSession, mergeRestoredContext, sessionCatalog, sessionState, updateSessionState } from "../session/catalog.js";
@@ -172,6 +178,7 @@ function AppContent({
   } | null>(null);
   const permissionResolveRef = useRef<((action: PermissionAction) => void) | null>(null);
   const permissionSequenceRef = useRef(0);
+  const permissionQueueRef = useRef(new ApprovalQueue());
   const [inputTokens, setInputTokens] = useState<number>();
   const [outputTokens, setOutputTokens] = useState<number>();
   const [contextOverhead, setContextOverhead] = useState(0);
@@ -202,6 +209,7 @@ function AppContent({
   const codeReviewManagerRef = useRef<CodeReviewManager | undefined>(undefined);
   const reviewSessionRef = useRef<ReviewSession | undefined>(undefined);
   const abortRef = useRef<AbortController | undefined>(undefined);
+  const metricsRef = useRef<RunMetrics | undefined>(undefined);
   const lastCtrlCRef = useRef(0);
   const exitHintTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const [mcpInfo, setMcpInfo] = useState<{
@@ -688,6 +696,10 @@ function AppContent({
 
     const controller = new AbortController();
     const checkpointMessageIndex = conversationRef.current.getMessages().length;
+    const budget = resolveBudget(skill.meta.model?.trim() || config.model, modelCapabilities, executionSettings, {}, config.base_url);
+    const metrics = recordMetrics(workDir, { model: skill.meta.model?.trim() || config.model, protocol: config.protocol, contextWindow: budget.contextWindow, maxOutput: budget.maxOutput, budgetSource: budget.source, endpointId: endpointIdentity(config.base_url) });
+    metricsRef.current = metrics;
+    const initialization = metrics.start("initialization");
     abortRef.current = controller;
     setStatus("waiting");
     setStartedAt(Date.now());
@@ -705,7 +717,7 @@ function AppContent({
       const runtimePromise = runtimeRef.current
         ?? startRuntime(runtimeFactory, config, workDir, buildSkillSection(skillRuntimeRef.current!.catalog));
       runtimeRef.current = runtimePromise;
-      const runtime = await runtimePromise;
+      const runtime = await awaitWithSignal(runtimePromise, controller.signal);
       const forkHost = {
         ...skillRuntimeRef.current!.host,
         runSubAgent: async (
@@ -713,7 +725,9 @@ function AppContent({
           allowedTools: readonly string[] | undefined,
           model: string | undefined,
         ) => {
-          const provider = await providerForSkillFork(runtime.provider, model);
+          const provider = await awaitWithSignal(providerForSkillFork(runtime.provider, model), controller.signal);
+          clearTimeout(timeout);
+          metrics.end(initialization);
           const result = await runSkillForkAgent(prompt, {
             provider,
             registry: registryRef.current!,
@@ -723,11 +737,10 @@ function AppContent({
             checker: new PermissionChecker(workDir, mode),
             ...(allowedTools === undefined ? {} : { allowedTools }),
             abortSignal: controller.signal,
-            contextWindow: contextWindowFor(config, modelCapabilities),
-            maxOutput: 8_192,
+            budget: { ...budget, execution: { ...budget.execution, taskTimeoutMs: Math.max(1, budget.execution.taskTimeoutMs - metrics.summary().observedMs) } }, metrics,
             ...(fileHistoryRef.current === null ? {} : { fileHistory: fileHistoryRef.current }),
-            onPermissionRequest: (toolName, toolArgs, decision) =>
-              requestToolPermission(controller, toolName, toolArgs, decision),
+            onPermissionRequest: (toolName, toolArgs, decision, signal) =>
+              requestToolPermission({ signal: signal ?? controller.signal }, toolName, toolArgs, decision),
             reminders: mcpInstructionsRef.current,
           });
           return result.output;
@@ -764,8 +777,10 @@ function AppContent({
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setCompactNotice(`Skill fork error: ${message}`);
+      if (metrics.outcome === "running") metrics.outcome = "error";
     } finally {
       clearTimeout(timeout);
+      metrics.finish(timedOut ? "timeout" : controller.signal.aborted ? "interrupted" : metrics.outcome);
       if (abortRef.current === controller) abortRef.current = undefined;
       setStatus("idle");
       setExitHint("");
@@ -773,35 +788,21 @@ function AppContent({
   }
 
   function requestToolPermission(
-    controller: AbortController,
+    controller: { signal: AbortSignal },
     toolName: string,
     args: Record<string, unknown>,
     decision: Decision,
   ): Promise<PermissionAction> {
-    return new Promise<PermissionAction>((resolve) => {
-      let settled = false;
-      const onAbort = (): void => finish("deny");
-      const finish = (action: PermissionAction): void => {
-        if (settled) return;
-        settled = true;
-        controller.signal.removeEventListener("abort", onAbort);
-        if (permissionResolveRef.current === finish) {
-          permissionResolveRef.current = null;
-          setPermissionRequest(null);
-        }
-        resolve(action);
-      };
-
-      controller.signal.addEventListener("abort", onAbort, { once: true });
-      permissionResolveRef.current = finish;
-      setPermissionRequest({
+    return permissionQueueRef.current.request(controller.signal, (finish) => {
+        permissionResolveRef.current = finish;
+        setPermissionRequest({
         id: ++permissionSequenceRef.current,
         toolName,
         argsSummary: [args.command, args.file_path, args.pattern, args.path].find((value): value is string => typeof value === "string") ?? JSON.stringify(args, null, 2),
         reason: decision.reason,
         allowTask: taskApprovalEligible(toolName, args, mode, decision),
-      });
-    });
+        });
+    }, () => { permissionResolveRef.current = null; setPermissionRequest(null); });
   }
 
   async function providerForSkillFork(provider: Provider, model: string | undefined): Promise<Provider> {
@@ -856,6 +857,17 @@ function AppContent({
         else openModels();
         return;
       case "tasks": openTasks(); return;
+      case "stats":
+        try {
+          if (args === "list" || args === "children") {
+            const entries = listMetrics(workDir).filter((summary) => args !== "children" || summary.identity?.parentRunId === metricsRef.current?.runId);
+            setCompactNotice(entries.length ? entries.map((summary) => `${summary.runId} · ${summary.identity?.model ?? "未知模型"} · ${summary.outcome}${summary.identity?.parentRunId ? ` · parent ${summary.identity.parentRunId}` : ""}`).join("\n") + "\n/stats <运行标识> 查看详情" : "暂无对应性能记录。");
+          } else {
+            const summary = args ? loadMetrics(workDir, args) : metricsRef.current?.summary() ?? loadMetrics(workDir);
+            setCompactNotice(summary ? formatMetrics(summary) : "暂无性能记录。旧会话无法还原的耗时显示未知；下一次任务会开始记录。");
+          }
+        } catch (error) { setCompactNotice(`性能记录读取失败：${error instanceof Error ? error.message : String(error)}`); }
+        return;
       case "hotkeys": setCompactNotice(hotkeyHelp(preferences)); return;
       case "files":
         if (args.startsWith("remove ")) {
@@ -949,41 +961,56 @@ function AppContent({
     setCompactNotice("");
     const controller = new AbortController(); abortRef.current = controller; setStatus("waiting");
     const original = conversationRef.current.getMessages();
+    const budget = resolveBudget(config.model, modelCapabilities, executionSettings, {}, config.base_url);
+    const metrics = recordMetrics(workDir, { model: config.model, protocol: config.protocol, contextWindow: budget.contextWindow, maxOutput: budget.maxOutput, budgetSource: budget.source, endpointId: endpointIdentity(config.base_url) });
+    metricsRef.current = metrics;
+    const timeout = setTimeout(() => controller.abort(new Error("Compaction task timeout")), budget.execution.taskTimeoutMs);
     try {
       const runtimePromise = runtimeRef.current
         ?? startRuntime(runtimeFactory, config, workDir, buildSkillSection(skillRuntimeRef.current!.catalog));
       runtimeRef.current = runtimePromise;
-      const runtime = await runtimePromise;
+      const runtime = await awaitWithSignal(runtimePromise, controller.signal);
       const result = await forceCompact(
         conversationRef.current,
         runtime.provider,
         recoveryStateRef.current,
         registryRef.current!.listTools().map((tool) => tool.name),
         controller.signal,
+        metrics,
+        budget,
+        applyBudget(original, workDir, new ContentReplacementState(), toolOutputBudget(budget.contextWindow, budget.maxOutput)),
       );
       if (result.boundary !== undefined) {
         saveCompactBoundary(workDir, sessionIdRef.current, result.boundary);
       }
       setMessages(conversationRef.current.getMessages());
       setCompactNotice(result.message);
+      metrics.outcome = result.compacted ? "completed" : "skipped";
     } catch (error) {
       conversationRef.current.restoreMessages(original); setMessages(conversationRef.current.getMessages());
       const message = error instanceof Error ? error.message : String(error);
       setCompactNotice(`Compaction failed: ${message}`);
-    } finally { abortRef.current = undefined; setStatus("idle"); }
+      metrics.outcome = controller.signal.aborted ? "interrupted" : "error";
+    } finally { clearTimeout(timeout); metrics.finish(); abortRef.current = undefined; setStatus("idle"); }
   }
 
   async function submit(rawText: string, bypassSlash = false): Promise<void> {
     const config = selectedConfig;
     if (!config) return;
     if (switchingRef.current) { setCompactNotice("模型切换中，请稍后发送。"); return; }
-    if (!bypassSlash && busy && /^\/(?:model|tasks|settings|hotkeys|files)(?:\s|$)/i.test(rawText)) { await handleSlashCommand(rawText, config); return; }
+    if (!bypassSlash && busy && /^\/(?:model|tasks|stats|settings|hotkeys|files)(?:\s|$)/i.test(rawText)) { await handleSlashCommand(rawText, config); return; }
     if (busy) {
       steeringRef.current.push(rawText + referenceReminder(references)); setReferences([]);
       setCompactNotice(`已排入 ${steeringRef.current.length} 条当前任务补充，下一安全边界生效；Alt+Q 可取回。`);
       return;
     }
     if (!bypassSlash && await handleSlashCommand(rawText, config)) return;
+
+    const budget = resolveBudget(config.model, modelCapabilities, executionSettings, {}, config.base_url);
+    const metrics = recordMetrics(workDir, { model: config.model, protocol: config.protocol, contextWindow: budget.contextWindow, maxOutput: budget.maxOutput, budgetSource: budget.source, endpointId: endpointIdentity(config.base_url) });
+    metricsRef.current = metrics;
+    const initialization = metrics.start("initialization");
+    const usageBaseline = { input: inputTokens ?? 0, output: outputTokens ?? 0 };
 
     const checkpointMessageIndex = conversationRef.current.getMessages().length;
     try {
@@ -992,6 +1019,7 @@ function AppContent({
     } catch (error) {
       setErrorMessage(`File history: ${error instanceof Error ? error.message : "Unable to prepare a checkpoint."}`);
       setStatus("failed");
+      metrics.end(initialization, "failed"); metrics.finish("error");
       return;
     }
     conversationRef.current.addUserMessage(rawText + referenceReminder(references));
@@ -1008,13 +1036,17 @@ function AppContent({
     const controller = new AbortController();
     abortRef.current = controller;
     let agentFailed = false;
+    const approvalClock = new ApprovalClock();
+    const initializationTimeout = setTimeout(() => controller.abort(new Error("Task initialization timeout")), budget.execution.taskTimeoutMs);
     try {
       const runtimePromise = runtimeRef.current
         ?? startRuntime(runtimeFactory, config, workDir, buildSkillSection(skillRuntimeRef.current!.catalog));
       runtimeRef.current = runtimePromise;
-      const runtime = await runtimePromise;
+      const runtime = await awaitWithSignal(runtimePromise, controller.signal);
+      clearTimeout(initializationTimeout);
+      metrics.end(initialization);
       if (memoryExtractorRef.current === null) {
-        memoryExtractorRef.current = new MemoryExtractor(runtime.provider, workDir);
+        memoryExtractorRef.current = new MemoryExtractor(auxiliaryProvider(runtime.provider, workDir, budget), workDir);
       }
       const registry = registryRef.current!;
       const subAgentRunner = new SubAgentRunner({
@@ -1023,9 +1055,12 @@ function AppContent({
         registry,
         systemPrompt: runtime.systemPrompt,
         workDir,
-        contextWindow: contextWindowFor(config, modelCapabilities),
-        onPermissionRequest: (toolName, args, decision) =>
-          requestToolPermission(controller, toolName, args, decision),
+        modelCapabilities,
+        execution: executionSettings,
+        parentRunId: metrics.runId,
+        approvalClock,
+        onPermissionRequest: (toolName, args, decision, signal) =>
+          requestToolPermission({ signal: signal ?? controller.signal }, toolName, args, decision),
       });
       subAgentRunnerRef.current = subAgentRunner;
       if (taskManagerRef.current === undefined) {
@@ -1071,6 +1106,9 @@ function AppContent({
         taskManager: () => taskManagerRef.current!,
       }));
       const events = runSession({
+        metrics,
+        budget: { ...budget, execution: { ...budget.execution, taskTimeoutMs: Math.max(1, budget.execution.taskTimeoutMs - metrics.summary().observedMs) } },
+        approvalClock,
         sessionId: sessionIdRef.current,
         execution: executionSettings,
         trackDelivery: true,
@@ -1101,8 +1139,8 @@ function AppContent({
           return [...taskReminders, ...(teamManagerRef.current?.drainLeadReminders() ?? [])];
         },
         ...(fileHistoryRef.current === null ? {} : { fileHistory: fileHistoryRef.current }),
-        onPermissionRequest: (toolName, args, decision) =>
-          requestToolPermission(controller, toolName, args, decision),
+        onPermissionRequest: (toolName, args, decision, signal) =>
+          requestToolPermission({ signal: signal ?? controller.signal }, toolName, args, decision),
       });
 
       for await (const event of events) {
@@ -1159,12 +1197,9 @@ function AppContent({
             if (!isChangeInspection(rawText)) triggerMemoryExtraction(runtime.provider);
           }
         } else if (event.type === "usage") {
-          if (event.inputTokens !== undefined) {
-            setInputTokens((current) => (current ?? 0) + event.inputTokens!);
-          }
-          if (event.outputTokens !== undefined) {
-            setOutputTokens((current) => (current ?? 0) + event.outputTokens!);
-          }
+          const usage = metrics.summary().usage;
+          if (usage.inputTokens !== undefined || usage.cacheReadInputTokens !== undefined) setInputTokens(usageBaseline.input + (usage.inputTokens ?? 0) + (usage.cacheReadInputTokens ?? 0) + (usage.cacheCreationInputTokens ?? 0));
+          if (usage.outputTokens !== undefined) setOutputTokens(usageBaseline.output + usage.outputTokens);
         } else if (event.type === "error") {
           agentFailed = true;
           setErrorMessage(event.message);
@@ -1178,12 +1213,18 @@ function AppContent({
       setPrimaryTask((previous) => previous ? { ...previous, status: controller.signal.aborted ? "已取消" : agentFailed ? "失败" : previous.status === "运行中" ? "执行结束" : previous.status } : previous);
     } catch (error) {
       if (!controller.signal.aborted) rollbackUnprovenModel();
+      metrics.outcome = controller.signal.aborted ? "interrupted" : "error";
       setErrorMessage(
         error instanceof SessionPersistenceError ? error.message : formatProviderError(error, [config.api_key]),
       );
       setStatus("failed");
       setPrimaryTask((previous) => previous ? { ...previous, status: "失败", action: "请求或保存失败" } : previous);
     } finally {
+      clearTimeout(initializationTimeout);
+      metrics.finish(controller.signal.aborted ? "interrupted" : metrics.outcome === "running" ? "error" : metrics.outcome);
+      const summary = metrics.summary();
+      setPrimaryTask((previous) => previous ? { ...previous, detail: `${previous.detail}\n\n${formatMetrics(summary)}` } : previous);
+      if (summary.warning) setCompactNotice((previous) => `${previous}\n${summary.warning}`);
       abortRef.current = undefined;
       setStreamingText("");
       setActiveTools([]);
@@ -1206,7 +1247,7 @@ function AppContent({
       .slice(-40_000);
     if (summary.trim() === "") return;
 
-    const extractor = memoryExtractorRef.current ?? new MemoryExtractor(provider, workDir);
+    const extractor = memoryExtractorRef.current ?? new MemoryExtractor(auxiliaryProvider(provider, workDir, resolveBudget(provider.config.model, modelCapabilities, executionSettings, {}, provider.config.base_url)), workDir);
     memoryExtractorRef.current = extractor;
     const isPending = extractor.isRunning;
     if (!isPending) memoryExtractingRef.current = true;
@@ -1434,7 +1475,7 @@ function AppContent({
                   if (modelSwitchBusy) return false;
                   if (busy && !options?.literal && value.startsWith("/")) {
                     const command = parseCommand(value);
-                    if (command && commandRegistryRef.current!.find(command.name) && !["model", "tasks", "settings", "hotkeys", "files"].includes(command.name.toLowerCase())) { setCompactNotice("当前任务执行中，此命令暂不可用；草稿已保留。"); return false; }
+                    if (command && commandRegistryRef.current!.find(command.name) && !["model", "tasks", "stats", "settings", "hotkeys", "files"].includes(command.name.toLowerCase())) { setCompactNotice("当前任务执行中，此命令暂不可用；草稿已保留。"); return false; }
                   }
                   if (busy && steeringRef.current.length >= 20) { setCompactNotice("当前任务补充已达 20 条，草稿保留；Alt+Q 可取回。"); return false; }
                   try { updateSessionState(workDir, sessionIdRef.current, { draft: "" }); }
@@ -1453,15 +1494,17 @@ function AppContent({
               {references.length > 0 && !panel && <Text dimColor wrap="truncate-end">引用：{references.map((file, index) => `${index + 1}:${file.path}`).join(" · ")} · /files remove 序号</Text>}
               <StatusBar
                 mode={mode}
+                columns={columns}
                 busy={busy}
                 teamCount={teammateStates.length}
                 contextTokens={estimateMessages(messages) + contextOverhead + Math.ceil(streamingText.length / 3.5)}
-                {...(modelCapabilities[selectedConfig.model] ? { contextWindow: modelCapabilities[selectedConfig.model]!.contextWindow } : {})}
+                contextWindow={resolveBudget(selectedConfig.model, modelCapabilities, {}, {}, selectedConfig.base_url).contextWindow}
+                budgetSource={resolveBudget(selectedConfig.model, modelCapabilities, {}, {}, selectedConfig.base_url).source}
                 highContrast={preferences.highContrast}
                 {...(inputTokens === undefined ? {} : { inputTokens })}
                 {...(outputTokens === undefined ? {} : { outputTokens })}
               />
-              {rows >= 16 && !preferences.compact && !permissionRequest && !teamsDialogOpen && !noticeExpanded && !panel && <Text dimColor wrap="truncate-end">{preferences.bindings.sessions} 会话 · {preferences.bindings.models} 模型 · {preferences.bindings.tasks} 任务 · /hotkeys 帮助</Text>}
+              {rows >= 16 && !preferences.compact && !permissionRequest && !teamsDialogOpen && !noticeExpanded && !panel && <Text dimColor wrap="truncate-end">Enter 发送 · Ctrl+J 换行 · {preferences.bindings.tasks.replace("alt+", "Alt+")} 任务 · /hotkeys 帮助</Text>}
             </Box>
           </>}>
           {(height) => panel && !permissionRequest && !teamsDialogOpen && !tooSmall ? <ChoiceDialog key={panel.title} title={panel.title} items={panel.title === "任务面板" ? taskItems : panel.items} columns={columns} maxHeight={height} onClose={() => { panelRequest.current++; setPanel(null); }} onSelect={panel.select} {...(panel.cancel ? { onAction: (id: string) => panel.cancel?.(id) } : {})} {...(panel.hint ? { hint: panel.hint } : {})} previewOnEnter={panel.title === "任务面板"} />

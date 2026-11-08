@@ -1,4 +1,7 @@
 import { Agent, type AgentConfig } from "../agent/agent.js";
+import { resolveBudget, type EffectiveBudget } from "../agent/budgets.js";
+import type { ExecutionSettings, ModelCapabilities } from "../agent/execution.js";
+import { recordMetrics, endpointIdentity, type RunMetrics } from "../metrics/run-metrics.js";
 import { Conversation } from "../conversation/conversation.js";
 import type { FileHistory } from "../filehistory/filehistory.js";
 import type { Provider } from "../llm/client.js";
@@ -22,6 +25,11 @@ export interface ForkRunnerConfig {
   abortSignal?: AbortSignal;
   contextWindow?: number;
   maxOutput?: number;
+  budget?: EffectiveBudget;
+  modelCapabilities?: Record<string, ModelCapabilities>;
+  execution?: Partial<ExecutionSettings>;
+  metrics?: RunMetrics;
+  parentRunId?: string;
   fileHistory?: FileHistory;
   onPermissionRequest?: AgentConfig["onPermissionRequest"];
   reminders?: readonly string[];
@@ -64,7 +72,12 @@ export async function runSkillForkAgent(
   };
   registry.register(new LoadSkillTool(config.catalog, host));
 
+  const budget = config.budget ?? resolveBudget(config.provider.config.model, config.modelCapabilities, config.execution,
+    { ...(config.contextWindow === undefined ? {} : { contextWindow: config.contextWindow }), ...(config.maxOutput === undefined ? {} : { maxOutput: config.maxOutput }) }, config.provider.config.base_url);
+  const metrics = config.metrics ?? recordMetrics(config.workDir, { model: config.provider.config.model, protocol: config.provider.config.protocol, contextWindow: budget.contextWindow, maxOutput: budget.maxOutput, budgetSource: budget.source,
+    ...(config.parentRunId ? { parentRunId: config.parentRunId } : {}), endpointId: endpointIdentity(config.provider.config.base_url) });
   const agent = new Agent({
+    budget, metrics, finishMetrics: false,
     provider: config.provider,
     registry,
     conversation,
@@ -83,9 +96,12 @@ export async function runSkillForkAgent(
   });
 
   let error = "";
-  for await (const event of agent.run()) {
-    if (event.type === "error") error = event.message;
-  }
+  try {
+    for await (const event of agent.run()) {
+      if (event.type === "error") error = event.message;
+    }
+  } catch (caught) { metrics.outcome = config.abortSignal?.aborted ? "interrupted" : "error"; throw caught; }
+  finally { if (!config.metrics) metrics.finish(); }
   if (error !== "") throw new Error(error);
   if (config.abortSignal?.aborted) return { output: "", interrupted: true };
 

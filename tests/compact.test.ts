@@ -7,7 +7,7 @@ import type { StreamEvent } from "../src/llm/events.js";
 
 describe("context compaction", () => {
   it("calculates the automatic threshold", () => {
-    expect(computeCompactThreshold(200_000, 8_192)).toBe(178_808);
+    expect(computeCompactThreshold(200_000, 8_192)).toBe(183_616);
   });
 
   it("keeps at least five recent messages", () => {

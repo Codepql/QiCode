@@ -36,7 +36,7 @@ describe("source tracing and bounded recovery", () => {
     const provider: Provider = { config: providerConfig, async *stream() { requests++; yield { type: "text_delta", text: "Goal: trace the request lifecycle. Completed: input and tools. Next: verify protocol conversion." }; yield { type: "done" }; } };
     const recovery = new RecoveryState();
     for (let i = 0; i < 5; i++) recovery.recordFileRead(`source-${i}.ts`, "large file\n".repeat(10_000));
-    const conversation = new Conversation(); for (let i = 0; i < 12; i++) conversation.addUserMessage("x".repeat(7000));
+    const conversation = new Conversation(); for (let i = 0; i < 12; i++) conversation.addUserMessage("x".repeat(7500));
     const tracking = new AutoCompactTrackingState();
     expect((await manageContext(conversation, provider, 32768, 8192, tracking, recovery, ["ReadFile"])).compacted).toBe(true);
     expect(estimateTokens(conversation)).toBeLessThan(computeCompactThreshold(32768, 8192));

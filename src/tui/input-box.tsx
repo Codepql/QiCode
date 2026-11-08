@@ -6,6 +6,7 @@ import type { PermissionMode } from "../permissions/checker.js";
 import { emptyEditor, erase, horizontal, insertText, lineEdge, projectEditor, replaceRange, vertical, type EditorState } from "./editor-state.js";
 import { useRoutedInput } from "./input-router.js";
 import { cellWidth, truncateCells, wrapRows } from "./text-layout.js";
+import { divider, theme } from "./theme.js";
 
 export interface InputBoxProps {
   disabled?: boolean;
@@ -172,8 +173,9 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
   const first = Math.max(0, Math.min(candidates.length - count, selected - count + 1));
   return (
     <Box flexDirection="column" width={Math.max(3, (columns ?? window.columns ?? 80) - 1)} flexShrink={0}>
+      {!compact && !disabled && (columns ?? window.columns ?? 80) >= 40 && <Text color={theme.muted} dimColor wrap="truncate-end">{divider(columns ?? window.columns ?? 80)}</Text>}
       <Box ref={inputRef} flexDirection="column">
-        {shown.map((row, index) => <Text key={index} wrap="truncate-end"><Text color={disabled ? "gray" : "cyan"}>{index === 0 ? "> " : "· "}</Text>{row.text}</Text>)}
+        {shown.map((row, index) => <Text key={index} wrap="truncate-end"><Text bold color={disabled ? theme.muted : theme.accent}>{index === 0 ? "> " : "· "}</Text>{!editor.value && !disabled ? <Text dimColor>描述任务，或输入 / 查看命令</Text> : row.text}</Text>)}
       </Box>
       {disabled && !compact && <Text dimColor wrap="truncate-end">等待执行结束… Esc 取消</Text>}
       {pasteMode && !disabled && <Text color="yellow" wrap="truncate-end">粘贴模式：Enter 换行，Alt+V 结束后 Enter 发送</Text>}
@@ -181,7 +183,7 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
       {editor.pastes.length > 0 && !compact && <Text dimColor wrap="truncate-end">Ctrl+O 展开/折叠粘贴；边界处退格移除</Text>}
       {showDropdown && <Box flexDirection="column">
         {candidates.length === 0 ? <Text dimColor>没有匹配的命令</Text> : candidates.slice(first, first + count).map((command, index) =>
-          <Text key={command.name} inverse={first + index === selected} wrap="truncate-end">{truncateCells(`/${command.name}  ${command.description}`, width + 2)}</Text>)}
+          <Text key={command.name} {...(first + index === selected ? { color: theme.accent } : {})} inverse={first + index === selected} wrap="truncate-end">{truncateCells(`/${command.name}  ${command.description}`, width + 2)}</Text>)}
         {candidates.length > count && <Text dimColor wrap="truncate-end">{selected + 1}/{candidates.length} · ↑↓ 选择 · Tab 补全</Text>}
       </Box>}
     </Box>

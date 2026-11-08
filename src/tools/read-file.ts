@@ -45,7 +45,8 @@ export class ReadFileTool implements Tool {
       if (info.size > 16 * 1024 * 1024) return { output: "文件超过 16 MiB 读取上限，请先使用 Grep 定位或缩小输入文件。", isError: true };
 
       const content = await readFile(absolutePath, "utf8");
-      ctx.fileVersions?.set(canonicalFilePath(absolutePath), contentHash(content));
+      const version = contentHash(content);
+      ctx.fileVersions?.set(canonicalFilePath(absolutePath), version);
       if (ctx.abortSignal?.aborted) return { output: "读取已取消", isError: true };
       const allLines = content.split("\n");
       const lines = allLines.slice(offset, offset + limit);
@@ -57,6 +58,7 @@ export class ReadFileTool implements Tool {
           .map((line, index) => `${offset + index + 1}\t${line.replace(/\r$/, "")}`)
           .join("\n") + range,
         isError: false,
+        metadata: { filePath: absolutePath, read: { version, startLine: lines.length ? offset + 1 : 0, endLine: lines.length ? end : 0, totalLines: allLines.length } },
       };
     } catch (error) {
       const code = error instanceof Error && "code" in error ? error.code : undefined;

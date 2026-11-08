@@ -26,6 +26,13 @@ import { ToolRegistry } from "../src/tools/registry.js";
 import type { Tool } from "../src/tools/types.js";
 
 describe("permissions: HITL 用户确认", () => {
+  it("allows simple read-only AND chains without approving executable or writing variants", () => {
+    for (const command of ['git status --short && echo "---" && dir', 'ls -la && pwd', 'type package.json', 'dir /a']) expect(isSafeCommand(command), command).toBe(true);
+    for (const command of ['ls && node task.js', 'ls &&', 'ls & pwd', 'ls || pwd', 'ls && cat x > out', 'ls && echo $(node task.js)', 'git diff --output=out && pwd', 'ls && git log --ext-diff', 'ls && rm x']) expect(isSafeCommand(command), command).toBe(false);
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-read-chain-"));
+    mkdirSync(join(workDir, ".qicode")); writeFileSync(join(workDir, ".qicode", "permissions.local.yaml"), '- rule: Bash(git status --short)\n  effect: deny\n');
+    expect(new PermissionChecker(workDir).check("Bash", "command", { command: 'git status --short && dir' }).effect).toBe("deny");
+  });
   it("default 模式下写文件触发用户确认；拒绝则不执行并回灌错误", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "qicode-perm-"));
     const calls: string[] = [];

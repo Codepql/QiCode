@@ -10,13 +10,14 @@ import { PermissionChecker } from "../src/permissions/checker.js";
 import { buildSystemPrompt, detectEnvironment } from "../src/prompt/builder.js";
 import { loadSession, newSessionId, rebuildFromSession } from "../src/session/session.js";
 import { runSession } from "../src/session/run-session.js";
+import { listMetrics, type RunSummary } from "../src/metrics/run-metrics.js";
 import type { Provider, ChatRequest } from "../src/llm/client.js";
 import type { StreamEvent } from "../src/llm/events.js";
 import type { AgentEvent } from "../src/agent/events.js";
 import type { TaskFixture, Step } from "./tasks.js";
 
 const exec = promisify(execFile);
-export interface ScenarioResult { id: string; mode: "offline-scripted" | "live"; success: boolean; elapsedMs: number; workDir: string; toolCalls: number; toolErrors: number; verificationFailures: number; resumed: boolean; accelerated: boolean; error?: string }
+export interface ScenarioResult { id: string; mode: "offline-scripted" | "live"; success: boolean; elapsedMs: number; workDir: string; toolCalls: number; toolErrors: number; verificationFailures: number; resumed: boolean; accelerated: boolean; runs: RunSummary[]; error?: string }
 
 class ScriptedProvider implements Provider {
   readonly config = { name: "scripted", protocol: "openai" as const, model: "deterministic-no-LLM", base_url: "http://localhost", api_key: "offline-unused-secret", thinking: false };
@@ -80,5 +81,5 @@ export async function runScenario(fixture: TaskFixture, liveProvider?: Provider)
     toolCalls: events.filter((event) => event.type === "tool_start").length,
     toolErrors: events.filter((event) => event.type === "tool_result" && event.isError).length,
     verificationFailures: events.filter((event) => event.type === "tool_result" && event.toolName === "Bash" && event.metadata?.exitCode !== undefined && event.metadata.exitCode !== 0).length,
-    resumed, accelerated: fixture.accelerated === true, ...(error ? { error } : {}) };
+    resumed, accelerated: fixture.accelerated === true, runs: listMetrics(workDir), ...(error ? { error } : {}) };
 }

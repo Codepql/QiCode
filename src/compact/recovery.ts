@@ -8,6 +8,7 @@ export interface FileReadRecord {
   path: string;
   content: string;
   timestamp: number;
+  evidence?: { version: string; startLine: number; endLine: number; totalLines: number };
 }
 
 export interface SkillInvocationRecord {
@@ -20,9 +21,9 @@ export class RecoveryState {
   readonly #files = new Map<string, FileReadRecord>();
   readonly #skills = new Map<string, SkillInvocationRecord>();
 
-  recordFileRead(path: string, content: string): void {
+  recordFileRead(path: string, content: string, evidence?: FileReadRecord["evidence"]): void {
     this.#files.delete(path);
-    this.#files.set(path, { path, content, timestamp: Date.now() });
+    this.#files.set(path, { path, content, timestamp: Date.now(), ...(evidence ? { evidence: { ...evidence } } : {}) });
   }
 
   recordSkillInvocation(name: string, body: string): void {
@@ -69,7 +70,7 @@ function buildFilesSection(files: readonly FileReadRecord[]): string {
     const content = truncateByTokens(file.content, RECOVERY_TOKENS_PER_FILE);
     const timestamp = new Date(file.timestamp).toISOString().replace(/\.\d{3}Z$/, "Z");
     const newline = content.endsWith("\n") ? "" : "\n";
-    return `### ${file.path} (read ${timestamp})\n\n\`\`\`\n${content}${newline}\`\`\``;
+    return `### ${file.path} (read ${timestamp})${file.evidence ? `\nObserved lines: ${file.evidence.startLine}-${file.evidence.endLine}/${file.evidence.totalLines}; version: ${file.evidence.version}` : ""}\n\n\`\`\`\n${content}${newline}\`\`\``;
   });
   return "## Recently read files\n\nThese are snapshots from earlier reads. Re-open a file when current bytes are needed.\n\n"
     + entries.join("\n\n");

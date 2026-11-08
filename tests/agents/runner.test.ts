@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { listMetrics } from "../../src/metrics/run-metrics.js";
 import { SubAgentRunner } from "../../src/agents/runner.js";
 import type { AgentDefinition } from "../../src/agents/definition.js";
 import type { ProviderConfig } from "../../src/config/types.js";
@@ -23,6 +27,22 @@ const definition: AgentDefinition = {
 };
 
 describe("SubAgentRunner", () => {
+  it("uses the child's actual model capability and records its parent independently", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-child-budget-"));
+    const runner = new SubAgentRunner({ providerConfig, registry: new ToolRegistry(), systemPrompt: "test", workDir,
+      parentRunId: "parent-run", contextWindow: 200000, modelCapabilities: { "child-model": { contextWindow: 16000, maxOutput: 2048 } },
+      providerFactory: async (config) => ({ config, async *stream(request) { expect(request.maxOutputTokens).toBe(2048); yield { type: "done", stopReason: "end_turn" }; } }) });
+    await expect(runner.run({ definition, prompt: "inspect", modelOverride: "child-model" })).resolves.toMatchObject({ stopReason: "completed" });
+    expect(listMetrics(workDir)[0]?.identity).toMatchObject({ model: "child-model", contextWindow: 16000, maxOutput: 2048, budgetSource: "configured", parentRunId: "parent-run" });
+  });
+  it("stops initialization that ignores cancellation and preserves timeout status", async () => {
+    vi.useFakeTimers();
+    try {
+      const runner = new SubAgentRunner({ providerConfig, registry: new ToolRegistry(), systemPrompt: "test", workDir: mkdtempSync(join(tmpdir(), "qicode-child-timeout-")), timeoutMs: 50, providerFactory: () => new Promise(() => {}) });
+      const pending = runner.run({ definition, prompt: "inspect" }); await vi.advanceTimersByTimeAsync(50);
+      await expect(pending).resolves.toMatchObject({ stopReason: "timeout" });
+    } finally { vi.useRealTimers(); }
+  });
   it("creates a provider with only the model overridden and returns final text", async () => {
     const providerConfigs: ProviderConfig[] = [];
     const runner = new SubAgentRunner({
