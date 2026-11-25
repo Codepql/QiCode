@@ -25,6 +25,10 @@ export class HookEngine {
     private readonly actionExecutor?: HookActionExecutor,
   ) {}
 
+  mayHaveSideEffects(event?: HookContext["event"]): boolean {
+    return this.hooks.some((hook) => hook.action.type !== "prompt" && (event === undefined || hook.event === event));
+  }
+
   async fire(
     event: HookContext["event"],
     context: Omit<HookContext, "event"> = {},

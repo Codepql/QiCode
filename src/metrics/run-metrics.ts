@@ -2,7 +2,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 
-export type SpanKind = "request" | "tool" | "permission" | "backoff" | "compaction" | "initialization";
+export type SpanKind = "request" | "tool" | "permission" | "backoff" | "compaction" | "initialization" | "workspace_scan";
 export type SpanStatus = "completed" | "failed" | "cancelled" | "timeout" | "ineffective" | "skipped" | "unknown";
 export interface MetricFields {
   requestId?: string; attempt?: number; purpose?: "main" | "compaction" | "auxiliary"; toolName?: string; toolId?: string;
@@ -150,7 +150,7 @@ function validEvent(value: unknown): value is MetricEvent {
   if (typeof e.spanId !== "string") return false;
   if (e.type === "first_event" || e.type === "first_text") return true;
   if (e.type === "usage") return object(e.usage) && Object.entries(e.usage).every(([key, n]) => (usageKeys as readonly string[]).includes(key) && number(n));
-  if (e.type === "span_start") return ["request", "tool", "permission", "backoff", "compaction", "initialization"].includes(e.kind as string) && object(e.fields);
+  if (e.type === "span_start") return ["request", "tool", "permission", "backoff", "compaction", "initialization", "workspace_scan"].includes(e.kind as string) && object(e.fields);
   return e.type === "span_end" && ["completed", "failed", "cancelled", "timeout", "ineffective", "skipped", "unknown"].includes(e.status as string) && object(e.fields);
 }
 export function listMetrics(workDir: string): RunSummary[] {
@@ -162,12 +162,19 @@ export function listMetrics(workDir: string): RunSummary[] {
 export function formatMetrics(summary: RunSummary): string {
   const ms = (value: number | null | undefined): string => value == null ? "未知" : `${(value / 1000).toFixed(2)}s`;
   const durations = (kind: SpanKind) => unionDuration(summary.spans.filter((span) => span.kind === kind).map((span) => ({ start: span.start, end: span.end ?? summary.observedMs })));
+  const scans = summary.spans.filter((span) => span.kind === "workspace_scan");
+  const scanSummary = (source: string) => {
+    const group = scans.filter((span) => span.fields.source === source);
+    const elapsed = group.some((span) => span.end === undefined) ? undefined : group.reduce((total, span) => total + (span.end! - span.start), 0);
+    return `${group.length} 次 / ${ms(elapsed)}`;
+  };
   return ["任务性能（本地记录）", `运行：${summary.runId} · ${summary.outcome}`, `模型：${summary.identity?.model ?? "未知"} · 容量 ${summary.identity?.contextWindow ?? "未知"} (${summary.identity?.budgetSource ?? "未知"})`,
     `总耗时 ${ms(summary.elapsedMs)} · 有效耗时 ${ms(summary.activeMs)} · 授权等待 ${ms(summary.approvalMs)}`,
     `首次工具 ${ms(summary.firstToolMs)} · 首文本 ${ms(summary.firstTextMs)}（从任务开始计）`,
     `模型请求 ${summary.requests} · 尝试 ${summary.attempts} · 工具 ${summary.tools}`,
     `压缩 ${summary.compactions.attempts}：成功 ${summary.compactions.successful} / 无效 ${summary.compactions.ineffective} / 失败 ${summary.compactions.failed}`,
     `请求耗时 ${ms(durations("request"))} · 工具耗时 ${ms(durations("tool"))} · 压缩耗时 ${ms(durations("compaction"))} · 退避 ${ms(durations("backoff"))}`,
+    ...(scans.length ? [`工作区扫描：初始 ${scanSummary("initial")} · 批次 ${scanSummary("batch")}`] : []),
     "各项可能重叠，不相加；未知结束事件不记作 0。",
     `已知用量：输入 ${summary.usage.inputTokens ?? "未知"} · 缓存读取 ${summary.usage.cacheReadInputTokens ?? "未知"} · 输出 ${summary.usage.outputTokens ?? "未知"}${summary.usageIncomplete ? "（记录不完整）" : ""} · 费用未知`,
     `已读 ${summary.reads.length} 次 · 重复 ${summary.reads.filter((read) => read.kind === "repeat").length} · 重叠 ${summary.reads.filter((read) => read.kind === "overlap").length}`,

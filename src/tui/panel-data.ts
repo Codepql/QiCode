@@ -24,7 +24,10 @@ export function settingsChoices(preferences: UiPreferences, source: string): Cho
 }
 export function hotkeyHelp(preferences: UiPreferences): string {
   return ["当前有效快捷键", ...Object.entries(preferences.bindings).map(([action, chord]) => `${chord}：${action}`),
-    "Enter 发送 · Ctrl+J 换行 · Alt+V 粘贴模式 · Ctrl+O 展开粘贴", "Alt+Q 取回任务补充 · @路径 + Tab 搜索文件 · PgUp/PgDn 浏览", "Ctrl+T 团队 · Shift+Tab 权限 · Esc 关闭弹窗/取消任务 · Ctrl+C 取消/两次退出",
+    "Enter 发送 · Ctrl+J 换行 · Alt+V 粘贴模式 · Ctrl+O 展开粘贴",
+    "运行中：Enter 补充 · Alt+J 排下一任务 · Alt+Q 取回补充 · Alt+U 取回下一任务",
+    "Alt+↑/↓ 选工具 · Alt+O 展开/收起 · Alt+PgUp/PgDn 翻日志 · PgUp/PgDn 浏览",
+    "@路径 + Tab 搜索文件 · Ctrl+T 团队 · Shift+Tab 权限 · Esc 关闭弹窗/取消任务 · Ctrl+C 取消/两次退出",
     "弹窗：输入搜索 · ↑↓ 选择 · Tab 预览 · Enter 确认 · Esc 返回；任务面板 Ctrl+X 取消所选任务",
     "授权：Y 允许本次 · T 允许本任务编辑/普通命令（可用时） · A 记住这条操作 · N 拒绝，无需回车",
     "配置：/settings bind <sessions|models|tasks|settings> <alt+s|alt+m|alt+t|alt+b|alt+n>",

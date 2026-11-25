@@ -1,6 +1,10 @@
 import React from "react";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { render } from "ink-testing-library";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ConversationMessage } from "../../src/conversation/types.js";
 import { ChatView } from "../../src/tui/chat-view.js";
 import { Activity } from "../../src/tui/activity.js";
@@ -84,6 +88,19 @@ describe("TUI layout", () => {
     expect(view.lastFrame()).not.toMatch(/[╭╮╰╯─]/);
   });
 
+  it("reports failed queue recovery without replacing the current draft", async () => {
+    const queued = "x".repeat(1024 * 1024);
+    const restoreResult = vi.fn();
+    const view = render(<InputBox onSubmit={() => {}} onDequeueNext={(restore) => restoreResult(restore(queued))} />);
+    try {
+      view.stdin.write("existing draft");
+      await vi.waitFor(() => expect(view.lastFrame()).toContain("existing draft"));
+      view.stdin.write("\x1bu");
+      await vi.waitFor(() => expect(restoreResult).toHaveBeenCalledWith(false));
+      expect(view.lastFrame()).toContain("existing draft");
+    } finally { view.unmount(); }
+  });
+
   it("uses dedicated transcript keys without taking editor navigation keys", async () => {
     const messages: ConversationMessage[] = [];
     for (let index = 0; index < 12; index += 1) {
@@ -102,6 +119,33 @@ describe("TUI layout", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(view.lastFrame()).toContain("answer-11");
     view.unmount();
+  });
+
+  it("opens a failed command's log in place, pages it, and restores the prior view", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-tool-log-"));
+    const dir = join(workDir, ".qicode", "tool_results");
+    mkdirSync(dir, { recursive: true });
+    const logPath = join(dir, `command-${randomUUID()}.log`);
+    const first = "first log page\n";
+    writeFileSync(logPath, `${first}${"a".repeat(8191 - first.length)}中文\nsecond log page`);
+    const messages: ConversationMessage[] = [
+      { role: "assistant", content: [{ type: "tool_use", id: "cmd", name: "Bash", input: { command: "command" } }] },
+      { role: "user", content: [{ type: "tool_result", toolUseId: "cmd", content: "failure preview", isError: true, display: { logPath, exitCode: 1 } }] },
+      { role: "assistant", content: [{ type: "text", text: "last assistant answer" }] },
+    ];
+    const view = render(<ChatView messages={messages} workDir={workDir} columns={80} maxHeight={9} />);
+    try {
+      expect(view.lastFrame()).toContain("退出码 1");
+      expect(view.lastFrame()).toContain("failure preview");
+      view.stdin.write("\x1bo");
+      await vi.waitFor(() => expect(view.lastFrame()).toContain("first log page"));
+      view.stdin.write("\x1b[6;3~");
+      await vi.waitFor(() => expect(view.lastFrame()).toContain("文\n"));
+      expect(view.lastFrame()).toContain("second log page");
+      view.stdin.write("\x1bo");
+      await vi.waitFor(() => expect(view.lastFrame()).toContain("last assistant answer"));
+      expect(view.lastFrame()).not.toContain("second log page");
+    } finally { view.unmount(); }
   });
 
   it("shows slash completion candidates for a command prefix", async () => {

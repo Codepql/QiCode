@@ -24,6 +24,7 @@ export interface ToolResultBlock {
   isError: boolean;
   executionState?: "unknown" | "not_executed";
   evidence?: { path: string; version: string; startLine: number; endLine: number; totalLines: number };
+  display?: { exitCode?: number; logPath?: string };
 }
 
 export type ConversationBlock =

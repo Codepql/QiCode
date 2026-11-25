@@ -12,6 +12,7 @@ import type { EnvironmentContext } from "../../src/prompt/sections.js";
 import { App, initializeAgentRuntime, mergeForkUiMessages } from "../../src/tui/app.js";
 import { VERSION } from "../../src/version.js";
 import type { ConversationMessage } from "../../src/conversation/types.js";
+import { MemoryManager } from "../../src/memory/manager.js";
 
 const providerConfig: ProviderConfig = {
   name: "test",
@@ -23,6 +24,69 @@ const providerConfig: ProviderConfig = {
 };
 
 describe("App", () => {
+  it("saves explicitly requested memory after a successful task with no file changes", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-explicit-memory-"));
+    const requests: ChatRequest[] = [];
+    const provider: Provider = { config: providerConfig, async *stream(request) {
+      requests.push(request);
+      const text = request.systemPrompt.startsWith("Extract durable memory")
+        ? "MEMORY_NAME: use-pnpm\nMEMORY_TYPE: project\nMEMORY_DESC: Preferred package manager\nMEMORY_BODY: Use pnpm for this project."
+        : "已记录偏好。";
+      yield { type: "text_delta", text };
+      yield { type: "done", stopReason: "stop" };
+    } };
+    const view = render(<App providers={[providerConfig]} workDir={workDir} runtimeFactory={async () => ({ provider, systemPrompt: "test" })} />);
+    try {
+      await waitFor(() => (view.lastFrame() ?? "").includes("test-model"));
+      view.stdin.write("请记住以后先用 pnpm"); view.stdin.write("\r");
+      await vi.waitFor(() => expect(new MemoryManager(workDir).getMemories()).toEqual(expect.arrayContaining([expect.objectContaining({ name: "use-pnpm" })])));
+      expect(requests).toHaveLength(2);
+    } finally { view.unmount(); }
+  });
+  it.each([false, true])("queues the next prompt separately and preserves it on cancellation (%s)", async (cancel) => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-next-task-"));
+    const requests: ChatRequest[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const provider: Provider = { config: providerConfig, async *stream(request) {
+      requests.push(request);
+      if (requests.length === 1) await gate;
+      yield { type: "text_delta", text: "done" };
+      yield { type: "done", stopReason: "stop" };
+    } };
+    const view = render(<App providers={[providerConfig]} workDir={workDir} runtimeFactory={async () => ({ provider, systemPrompt: "test" })} />);
+    try {
+      await waitFor(() => (view.lastFrame() ?? "").includes("test-model"));
+      view.stdin.write("first task"); view.stdin.write("\r");
+      await waitFor(() => requests.length === 1);
+      view.stdin.write("follow-up task"); view.stdin.write("\x1bj");
+      await waitFor(() => (view.lastFrame() ?? "").includes("下一任务 1"));
+      expect(requests).toHaveLength(1);
+      if (cancel) view.stdin.write("\x1b");
+      if (cancel) await waitFor(() => (view.lastFrame() ?? "").includes("下一任务 1（暂停）"));
+      release();
+      if (cancel) {
+        view.stdin.write("\x1bu");
+        await waitFor(() => (view.lastFrame() ?? "").includes("follow-up task") && !(view.lastFrame() ?? "").includes("下一任务 1"));
+        expect(requests).toHaveLength(1);
+      } else {
+        await waitFor(() => requests.length === 2);
+        expect(JSON.stringify(requests[1]?.messages)).toContain("follow-up task");
+      }
+    } finally { release(); view.unmount(); }
+  });
+  it("answers the active-model question locally without main or memory requests", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-model-answer-"));
+    const requests: ChatRequest[] = [];
+    const view = render(<App providers={[providerConfig]} workDir={workDir} runtimeFactory={async () => ({ provider: fakeProvider(requests), systemPrompt: "test" })} />);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      view.stdin.write("这个项目用什么模型");
+      view.stdin.write("\r");
+      await waitFor(() => (view.lastFrame() ?? "").includes("当前 QiCode 会话使用"));
+      expect(requests).toHaveLength(0);
+    } finally { view.unmount(); }
+  });
   it("answers /stats locally without a model request or losing the cat logo", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "qicode-stats-ui-")); const requests: ChatRequest[] = [];
     const runtimeFactory = vi.fn(async () => ({ provider: fakeProvider(requests), systemPrompt: "test" }));
@@ -96,6 +160,7 @@ describe("App", () => {
   });
 
   it("reuses one stable system prompt across user turns", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-stable-prompt-"));
     const requests: ChatRequest[] = [];
     const runtimeFactory = vi.fn(async () => ({
       provider: fakeProvider(requests),
@@ -104,7 +169,7 @@ describe("App", () => {
     const view = render(
       <App
         providers={[providerConfig]}
-        workDir="/workspace"
+        workDir={workDir}
         runtimeFactory={runtimeFactory}
       />,
     );
@@ -113,6 +178,7 @@ describe("App", () => {
     await waitFor(() => (view.lastFrame() ?? "").includes("first"));
     view.stdin.write("\r");
     await waitFor(() => requests.filter((request) => request.systemPrompt === "stable-system-prompt").length === 1);
+    await waitFor(() => (view.lastFrame() ?? "").includes("Ctrl+C 两次退出"));
     view.stdin.write("second");
     await waitFor(() => (view.lastFrame() ?? "").includes("second"));
     view.stdin.write("\r");
@@ -129,11 +195,12 @@ describe("App", () => {
   });
 
   it("keeps once Hook state across App re-renders", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-once-hook-"));
     const requests: ChatRequest[] = [];
     const view = render(
       <App
         providers={[providerConfig]}
-        workDir="/workspace"
+        workDir={workDir}
         hooks={[{
           event: "pre_send",
           action: { type: "prompt", prompt: "once only" },
@@ -150,6 +217,7 @@ describe("App", () => {
     await waitFor(() => (view.lastFrame() ?? "").includes("first"));
     view.stdin.write("\r");
     await waitFor(() => requests.length >= 1);
+    await waitFor(() => (view.lastFrame() ?? "").includes("Ctrl+C 两次退出"));
     view.stdin.write("second");
     await waitFor(() => (view.lastFrame() ?? "").includes("second"));
     view.stdin.write("\r");
@@ -194,11 +262,12 @@ describe("App", () => {
   });
 
   it("turns prompt slash commands into a normal agent request and consumes unknown commands", async () => {
+    const workDir = mkdtempSync(join(tmpdir(), "qicode-slash-prompt-"));
     const requests: ChatRequest[] = [];
     const view = render(
       <App
         providers={[providerConfig]}
-        workDir="/workspace"
+        workDir={workDir}
         runtimeFactory={vi.fn(async () => ({
           provider: fakeProvider(requests),
           systemPrompt: "system",

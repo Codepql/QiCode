@@ -78,7 +78,7 @@ function markdownChunks(tokens: readonly Token[], width: number): Chunk[] {
 // Bound caches by recent message objects; no process-wide transcript retention.
 const markdownCache = new WeakMap<ConversationMessage, { text: string; width: number; chunks: Chunk[] }>();
 const lineCache = new WeakMap<ConversationMessage, { text: string; width: number; index: number; results: string; lines: ChatLine[] }>();
-export function layoutChat(messages: readonly ConversationMessage[], streamingText: string, activeTools: readonly ActiveTool[], width: number, toolPreview = true): ChatLine[] {
+export function layoutChat(messages: readonly ConversationMessage[], streamingText: string, activeTools: readonly ActiveTool[], width: number, toolPreview = true, expanded?: { id: string; output?: string; hint?: string }, selected?: string): ChatLine[] {
   const lines: ChatLine[] = [];
   const results = new Map<string, ToolResultBlock>(messages.flatMap((message) => message.content).filter((block) => block.type === "tool_result").map((result) => [result.toolUseId, result]));
   const gutter = width >= 48 ? 2 : 0;
@@ -99,9 +99,10 @@ export function layoutChat(messages: readonly ConversationMessage[], streamingTe
     if (!text && !tools.length) return;
     const resultKey = tools.map((tool) => {
       const result = results.get(tool.id);
-      return `${toolPreview}:${tool.id}:${result?.isError}:${result?.content.slice(0, 500)}`;
+      return JSON.stringify([toolPreview, tool.id, result?.isError, result?.display, result?.content.length, result?.content.slice(0, 500), result?.content.slice(-500)]);
     }).join("\n");
-    const cachedLines = lineCache.get(message);
+    const interactive = tools.some((tool) => tool.id === expanded?.id || tool.id === selected);
+    const cachedLines = interactive ? undefined : lineCache.get(message);
     if (cachedLines && cachedLines.text === text && cachedLines.index === index && cachedLines.width === width && cachedLines.results === resultKey) {
       for (const line of cachedLines.lines) lines.push(line);
       return;
@@ -122,16 +123,22 @@ export function layoutChat(messages: readonly ConversationMessage[], streamingTe
     }
     for (const tool of tools) {
       const result = results.get(tool.id);
-      append(`tool:${tool.id}`, `${result ? result.isError ? "✗" : "✓" : "●"} ${tool.name} ${formatArgs(tool.input)}`, result?.isError ? "error" : "tool");
-      if (toolPreview && result?.content) {
+      const code = result?.display?.exitCode;
+      const args = truncateCells(formatArgs(tool.input), Math.max(1, bodyWidth - 20));
+      append(`tool:${tool.id}`, `${selected === tool.id ? "› " : ""}${result ? result.isError ? "✗" : "✓" : "●"} ${tool.name}${code !== undefined ? ` [退出码 ${code}]` : ""} ${args}`, result?.isError ? "error" : "tool");
+      if (expanded?.id === tool.id && result) {
+        if (expanded.hint) append(`log-page:${tool.id}`, expanded.hint, "tool");
+        append(`result:${tool.id}`, expanded.output ?? result.content, result.isError ? "error" : "tool");
+        if (result.display?.logPath) append(`log:${tool.id}`, result.display.logPath, "tool");
+      } else if ((toolPreview || result?.isError) && result?.content) {
         const previewLines = sanitizeTerminalText(result.content).split("\n").filter((line) => line.trim());
         const limit = result.isError ? 4 : 2;
-        const preview = previewLines.slice(0, limit).map((line) => `  ${truncateCells(line, Math.max(1, bodyWidth - 2))}`).join("\n");
-        append(`result:${tool.id}`, preview + (previewLines.length > limit ? `\n  … 共 ${previewLines.length} 行 · /tasks 查看详情` : ""), result.isError ? "error" : "tool");
+        const preview = (result.isError ? previewLines.slice(-limit) : previewLines.slice(0, limit)).map((line) => `  ${truncateCells(line, Math.max(1, bodyWidth - 2))}`).join("\n");
+        append(`result:${tool.id}`, preview + (previewLines.length > limit || result.display?.logPath || previewLines.some((line) => line.length > bodyWidth - 2) ? "\n  … Alt+O 展开" : ""), result.isError ? "error" : "tool");
       }
     }
     append(`${id}:gap`, "", "text");
-    lineCache.set(message, { text, width, index, results: resultKey, lines: lines.slice(start) });
+    if (!interactive) lineCache.set(message, { text, width, index, results: resultKey, lines: lines.slice(start) });
   });
   if (streamingText) {
     const id = `message:${messages.length}`;

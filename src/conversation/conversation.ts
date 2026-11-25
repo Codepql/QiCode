@@ -160,6 +160,7 @@ function cloneBlock(block: ConversationBlock): ConversationBlock {
         isError: block.isError,
         ...(block.executionState ? { executionState: block.executionState } : {}),
         ...(block.evidence ? { evidence: { ...block.evidence } } : {}),
+        ...(block.display ? { display: { ...block.display } } : {}),
       };
   }
 }

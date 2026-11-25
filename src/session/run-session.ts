@@ -40,7 +40,7 @@ export async function* runSession(config: AgentConfig & { sessionId: string }): 
   });
     for await (const event of agent.run()) {
       if (event.type === "compact") flush(true);
-      else if (event.type === "tool_result" || event.type === "turn_complete" || event.type === "loop_complete") flush();
+      else if (event.type === "tool_result" || event.type === "turn_complete" || event.type === "delivery" || event.type === "loop_complete") flush();
       if (event.type === "delivery") append("delivery_v2", event.report);
       if (event.type === "loop_complete") append("run_end_v2", { stopReason: event.stopReason ?? "completed" });
       yield event;
