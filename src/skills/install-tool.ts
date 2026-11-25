@@ -100,8 +100,10 @@ export class InstallSkillTool implements Tool {
 
 function readWorkspaceFile(workDir: string, source: string): string {
   const workspace = realpathSync(workDir);
-  const candidate = resolve(workspace, source);
-  if (!isInside(workspace, candidate)) throw new Error("local source must stay inside the workspace");
+  const candidate = resolve(workDir, source);
+  if (!isInside(resolve(workDir), candidate) && !isInside(workspace, candidate)) {
+    throw new Error("local source must stay inside the workspace");
+  }
   if (lstatSync(candidate).isSymbolicLink()) throw new Error("symbolic-link sources are not allowed");
 
   const realSource = realpathSync(candidate);

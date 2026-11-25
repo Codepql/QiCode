@@ -216,8 +216,8 @@ describe("App", () => {
     view.stdin.write("first");
     await waitFor(() => (view.lastFrame() ?? "").includes("first"));
     view.stdin.write("\r");
-    await waitFor(() => requests.length >= 1);
-    await waitFor(() => (view.lastFrame() ?? "").includes("Ctrl+C 两次退出"));
+    await vi.waitFor(() => expect(requests).toHaveLength(1), { timeout: 2_000 });
+    await vi.waitFor(() => expect(view.lastFrame()).toContain("Ctrl+C 两次退出"), { timeout: 2_000 });
     view.stdin.write("second");
     await waitFor(() => (view.lastFrame() ?? "").includes("second"));
     view.stdin.write("\r");

@@ -139,14 +139,15 @@ export async function removeAgentWorktree(
   if (branch !== `${WORKTREE_BRANCH_PREFIX}${slug}`) {
     throw new Error("branch does not match the managed worktree path");
   }
+  const path = managedWorktreePath(root, slug);
 
   return withFileLock(worktreeRecordPath(root, slug), async () => {
   const record = readWorktreeRecord(root, slug);
-  const state = readGitState(worktreePath);
+  const state = readGitState(path);
   if (record === undefined || state?.branch !== branch
     || !sameRepository(state.commonGitDir, readGitState(root)?.commonGitDir)
-    || await hasWorktreeChanges(worktreePath, record.headCommit)
-    || !await ignoredFilesUnchanged(worktreePath, record.ignoredFiles)) {
+    || await hasWorktreeChanges(path, record.headCommit)
+    || !await ignoredFilesUnchanged(path, record.ignoredFiles)) {
     return {
       worktreeRemoved: false, branchRemoved: false,
       warnings: ["Worktree kept: changes, new commits, an unknown baseline, or unverifiable repository state."],
@@ -157,7 +158,7 @@ export async function removeAgentWorktree(
   let worktreeRemoved = false;
   let branchRemoved = false;
   try {
-    await runGit(root, ["worktree", "remove", worktreePath]);
+    await runGit(root, ["worktree", "remove", path]);
     worktreeRemoved = true;
   } catch (error) {
     warnings.push(`could not remove worktree: ${errorMessage(error)}`);
@@ -245,22 +246,14 @@ function managedWorktreePath(gitRoot: string, slug: string): string {
 
 function managedSlugForPath(gitRoot: string, worktreePath: string): string | undefined {
   const root = resolve(gitRoot, WORKTREE_DIRECTORY, "worktrees");
-  const candidate = resolve(worktreePath);
-  const relativePath = relative(root, candidate);
-  if (relativePath === "" || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) return undefined;
-  if (relativePath.includes(sep)) return undefined;
-
-  // A symlink placed under the managed directory must not turn cleanup into an
-  // operation on an external directory.
-  if (existsSync(candidate)) {
-    const actualPath = existingDirectory(candidate);
-    if (actualPath === undefined) return undefined;
-    const actualRelativePath = relative(root, actualPath);
-    if (actualRelativePath === "" || actualRelativePath.startsWith(`..${sep}`) || isAbsolute(actualRelativePath)) {
-      return undefined;
-    }
-  }
-  return isValidWorktreeSlug(basename(candidate)) ? basename(candidate) : undefined;
+  const path = resolve(worktreePath);
+  const slug = basename(path);
+  // Resolve aliases of the repository root while keeping the managed directory and its child fixed.
+  if (!isValidWorktreeSlug(slug) || relative(root, canonicalFilePath(dirname(path))) !== "") return undefined;
+  const candidate = join(root, slug);
+  if (!existsSync(candidate)) return slug;
+  const actualPath = existingDirectory(candidate);
+  return actualPath !== undefined && relative(candidate, actualPath) === "" ? slug : undefined;
 }
 
 /** Run independent setup steps without turning a created worktree into a failure. */

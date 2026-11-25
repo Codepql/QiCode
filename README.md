@@ -48,11 +48,7 @@ npm install --global @coderpql/qicode
 pnpm add --global @coderpql/qicode
 ```
 
-安装后进入任意项目目录，直接运行：
-
-```bash
-qicode
-```
+### 1. 初始化全局配置
 
 首次使用只需生成一次全局配置：
 
@@ -60,9 +56,38 @@ qicode
 qicode init
 ```
 
+初始化后会生成以下目录和文件；重复执行不会覆盖已有配置：
+
+```text
+~/.QiCode/
+  config.yaml             # Provider 配置
+  mcp-config/config.yaml  # MCP 配置
+  skills/                 # 个人 Skill 目录
+```
+
+### 2. 填写配置
+
+用编辑器打开命令输出的 `~/.QiCode/config.yaml` 路径，填写 API 地址、密钥和模型名称。Windows 下通常为 `C:\Users\<用户名>\.QiCode\config.yaml`：
+
+```yaml
+base_url: https://api.example.com/v1
+token: your-api-token
+model: your-model-name
+```
+
+以上值均为占位示例，请替换为你的服务配置。更多配置方式见下方 [Configuration](#configuration)。
+
+### 3. 启动 QiCode
+
+配置完成后，进入你要使用 QiCode 的任意项目目录运行：
+
+```bash
+qicode
+```
+
 ## Configuration
 
-QiCode 按以下顺序查找 Provider 配置：
+QiCode 按以下顺序加载 Provider 配置，后加载文件中的 Provider 列表会覆盖前面的列表；不存在的文件会跳过：
 
 1. `~/.QiCode/config.yaml`
 2. `<project>/.QiCode/config.yaml`
@@ -71,18 +96,24 @@ QiCode 按以下顺序查找 Provider 配置：
 也可以显式指定配置文件：
 
 ```bash
-pnpm dev -- --config path/to/config.yaml
+qicode --config path/to/config.yaml
 ```
 
-该命令会创建 `~/.QiCode/config.yaml`。普通用户只需填写三个字段：
+`qicode init` 创建的 `~/.QiCode/config.yaml` 适用于所有项目，普通用户只需填写三个字段：
 
 ```yaml
 base_url: https://api.example.com/v1
 token: your-api-token
-model: deepseek-v4-flash
+model: your-model-name
 ```
 
-之后在任意项目目录执行 `qicode`，都会使用该全局配置。项目确实需要不同模型或凭据时，执行 `qicode init --project`，再在 `<project>/.QiCode/config.local.yaml` 写入覆盖项。
+项目需要不同模型或凭据时，在项目目录执行：
+
+```bash
+qicode init --project
+```
+
+将生成的 `.QiCode/config.example.yaml` 复制为 `.QiCode/config.local.yaml`，填写该项目的 `base_url`、`token` 和 `model`，即可覆盖全局 Provider 配置。
 
 `protocol` 默认是 `openai`，适用于 OpenAI Chat Completions 及兼容服务。需要 Anthropic 或多个 Provider 时，使用完整格式：
 
@@ -122,7 +153,7 @@ Skill 文件使用目录形式 `skills/<name>/SKILL.md`。MCP 配置使用 `mcp_
 
 ## Usage
 
-启动已安装版本：
+完成上述初始化和配置后，在项目目录启动已安装版本：
 
 ```bash
 qicode
@@ -132,6 +163,12 @@ qicode
 
 ```bash
 pnpm install
+pnpm dev init
+```
+
+在生成的 `~/.QiCode/config.yaml` 中填写配置后启动：
+
+```bash
 pnpm dev
 ```
 
