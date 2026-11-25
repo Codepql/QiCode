@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isChangeInspection, inspectionReminder } from "../../src/agent/task-intent.js";
+import { isChangeInspection, inspectionReminder, inspectionRequestsChecks } from "../../src/agent/task-intent.js";
 import { TaskDelivery } from "../../src/agent/delivery.js";
 import { AutoCompactTrackingState, computeCompactThreshold, manageContext } from "../../src/compact/compact.js";
 import { Conversation } from "../../src/conversation/conversation.js";
@@ -8,6 +8,15 @@ import { layoutChat } from "../../src/tui/chat-layout.js";
 import type { ChatRequest, Provider } from "../../src/llm/client.js";
 
 describe("change inspection latency regressions", () => {
+  it("honors read-only review and skips the extra verification turn for small edits", async () => {
+    const goal = "请只读审查当前 QiCode 的任务执行链路，给出最小修复方案，不修改文件、不运行测试或构建。";
+    expect(isChangeInspection(goal)).toBe(true);
+    expect(inspectionRequestsChecks(goal)).toBe(false);
+    const delivery = new TaskDelivery("修改提示词文案，不运行测试", ".", false);
+    delivery.record("EditFile", { file_path: "prompt.ts" }, { isError: false, output: "done" });
+    expect(await delivery.continuation()).toBeUndefined();
+    expect(delivery.report().status).toBe("unverified");
+  });
   it("distinguishes inspecting existing changes from asking for further modifications", () => {
     expect(isChangeInspection("查看更改区代码，这个改动有什么提升")).toBe(true);
     expect(isChangeInspection("查看代码更改区")).toBe(true);

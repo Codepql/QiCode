@@ -19,13 +19,15 @@ export interface InputBoxProps {
   commands?: readonly Command[];
   usageTracker?: CommandUsageTracker;
   onSubmit(value: string, options?: { literal: boolean }): void | boolean;
-  onDequeue?(): string | undefined;
+  onDequeue?(restore: (text: string) => boolean): void;
+  onQueueNext?(value: string, options: { literal: boolean }): boolean;
+  onDequeueNext?(restore: (text: string) => boolean): void;
   onDraftChange?(value: string): void;
   restoredDraft?: { id: number; value: string };
   onFileSearch?(query: string, range: { start: number; end: number }): void;
 }
 
-export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestions = 8, historyKey = "", compact = false, commands = [], usageTracker, onSubmit, onDequeue, onDraftChange, restoredDraft, onFileSearch }: InputBoxProps) {
+export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestions = 8, historyKey = "", compact = false, commands = [], usageTracker, onSubmit, onDequeue, onQueueNext, onDequeueNext, onDraftChange, restoredDraft, onFileSearch }: InputBoxProps) {
   const window = useWindowSize();
   const width = Math.max(1, (columns ?? window.columns ?? 80) - 3);
   const [editor, setEditor] = useState(emptyEditor);
@@ -58,10 +60,11 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
   function dismiss(value: boolean): void { dismissedRef.current = value; setDismissed(value); }
   function manualPaste(value: boolean): void { pasteModeRef.current = value; setPasteMode(value); }
   function resetCandidates(): void { selectedIndex.current = 0; setDropdownIndex(0); dismiss(false); }
-  function insert(text: string, pasted = false): void {
+  function insert(text: string, pasted = false): boolean {
     const next = insertText(state.current, text, pasted);
-    if (!next) { setNotice("输入超过 1 MiB，本次插入已拒绝，原草稿保留"); return; }
+    if (!next) { setNotice("输入超过 1 MiB，本次插入已拒绝，原草稿保留"); return false; }
     update(next); resetCandidates(); setNotice("");
+    return true;
   }
 
   const query = editor.value.startsWith("/") ? editor.value.slice(1).toLowerCase() : "";
@@ -92,6 +95,13 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
   // fall through to approval shortcuts or the application's global shortcuts.
   usePaste((text) => { if (!disabled) insert(text, true); });
 
+  function accept(send: (value: string, options: { literal: boolean }) => void | boolean): void {
+    const current = state.current;
+    if (!current.value.trim() || send(current.value, { literal: current.literal }) === false) return;
+    if (history.current.at(-1) !== current.value) history.current = [...history.current, current.value].slice(-100);
+    historyIndex.current = -1; update(emptyEditor()); resetCandidates();
+  }
+
   useRoutedInput(20, (input, key) => {
     if (disabled || key.wheel !== undefined) return false;
     // Input packets can arrive before React commits the previous event.
@@ -99,7 +109,9 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
     const currentDropdown = !pasteModeRef.current && !state.current.literal && state.current.value.startsWith("/") && !/\s/.test(currentQuery) && !dismissedRef.current;
     const currentCandidates = currentQuery === query ? candidates : completions(currentQuery, commands, usageTracker);
     if (key.ctrl && (input === "c" || input === "t") || key.tab && key.shift) return false;
-    if (key.meta && input === "q" && onDequeue) { const text = onDequeue(); if (text) insert(text, true); return true; }
+    if (key.meta && input === "q" && onDequeue) { onDequeue((text) => insert(text, true)); return true; }
+    if (key.meta && input === "j" && onQueueNext) { accept(onQueueNext); return true; }
+    if (key.meta && input === "u" && onDequeueNext) { onDequeueNext((text) => insert(text, true)); return true; }
     if ((key.ctrl || key.meta) && input === "v") { manualPaste(!pasteModeRef.current); dismiss(true); return true; }
     if (key.ctrl && input === "o") {
       const collapse = state.current.pastes.some((part) => !part.collapsed);
@@ -128,12 +140,7 @@ export function InputBox({ disabled = false, columns, maxRows = 8, maxSuggestion
         update({ ...emptyEditor(), value: `/${selected.name} `, cursor: selected.name.length + 2 }); resetCandidates(); return true;
       }
       if (key.tab) return true;
-      const current = state.current;
-      if (current.value.trim()) {
-        if (onSubmit(current.value, { literal: current.literal }) === false) return true;
-        if (history.current.at(-1) !== current.value) history.current = [...history.current, current.value].slice(-100);
-        historyIndex.current = -1; update(emptyEditor()); resetCandidates();
-      }
+      accept(onSubmit);
       return true;
     }
     if (key.leftArrow || key.rightArrow) { update(horizontal(state.current, key.leftArrow ? -1 : 1, key.ctrl || key.meta)); return true; }

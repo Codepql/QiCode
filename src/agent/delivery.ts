@@ -1,12 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ToolResult } from "../tools/types.js";
+import type { RunMetrics } from "../metrics/run-metrics.js";
 import { workspaceState } from "./workspace-state.js";
-import { isChangeInspection } from "./task-intent.js";
+import { inspectionRequestsChecks, isChangeInspection, verificationCommandKind, verificationProhibited } from "./task-intent.js";
 
 export type DeliveryStatus = "completed" | "unverified" | "failed" | "blocked" | "cancelled" | "budget_exhausted";
 export interface VerificationRecord { command: string; revision: number; status: "passed" | "failed" | "blocked"; exitCode: number | null; logPath?: string }
-export interface DeliveryReport { status: DeliveryStatus; changedFiles: string[]; initialDirtyFiles: string[]; verifications: VerificationRecord[]; message: string }
+export interface DeliveryReport { status: DeliveryStatus; changedFiles: string[]; initialDirtyFiles: string[]; verifications: VerificationRecord[]; message: string; stopReason?: string; successfulTools?: number; unknownEffects?: boolean }
 
 export class TaskDelivery {
   revision = 0;
@@ -15,17 +16,18 @@ export class TaskDelivery {
   repairRounds = 0;
   toolCount = 0;
   denied = false;
+  private unknownEffects = false;
   private successfulTools = 0;
   private reminded = false;
   private observed: Map<string, string> | undefined;
   private initialDirtyFiles: string[] = [];
   private lastFailedRevision: number | undefined;
-  constructor(public goal: string, private readonly workDir: string, private readonly planMode: boolean) {}
+  constructor(public goal: string, private readonly workDir: string, private readonly planMode: boolean, private readonly metrics?: RunMetrics) {}
   get readOnlyInspection(): boolean { return isChangeInspection(this.goal); }
-  async initialize(): Promise<void> { if (this.readOnlyInspection) return; this.observed = await workspaceState(this.workDir); this.initialDirtyFiles = [...this.observed?.keys() ?? []]; }
+  async initialize(): Promise<void> { if (this.readOnlyInspection) return; this.observed = await this.scan("initial"); this.initialDirtyFiles = [...this.observed?.keys() ?? []]; }
   async observe(directlyEdited: Set<string>): Promise<void> {
     if (!this.observed) return;
-    const current = await workspaceState(this.workDir); if (!current) return;
+    const current = await this.scan("batch"); if (!current) return;
     const changed = new Set([...current.keys(), ...this.observed.keys()]);
     let shellChange = false;
     for (const file of changed) if (current.get(file) !== this.observed.get(file)) {
@@ -34,19 +36,25 @@ export class TaskDelivery {
     if (shellChange) this.revision++;
     this.observed = current;
   }
+  private async scan(source: "initial" | "batch"): Promise<Map<string, string> | undefined> {
+    const span = this.metrics?.start("workspace_scan", { source });
+    const state = await workspaceState(this.workDir);
+    if (span) this.metrics?.end(span, state ? "completed" : "failed");
+    return state;
+  }
   get actionRequested(): boolean {
     return !this.readOnlyInspection && !this.planMode && !/只解释|只规划|先规划|不要修改|仅分析|explain|plan only/i.test(this.goal)
       && /修复|实现|修改|新增|添加|检查|fix\b|implement\b|update\b|add\b|build\b/i.test(this.goal);
   }
   record(name: string, args: Record<string, unknown>, result: ToolResult): void {
     this.toolCount++;
-    if (result.metadata?.status === "unknown") this.denied = true;
+    if (result.metadata?.status === "unknown") { this.denied = true; this.unknownEffects = true; }
     if (!result.isError) this.successfulTools++;
     if (/Permission denied|Rejected by Hook|not available/.test(result.output)) this.denied = true;
     if (!result.isError && (name === "EditFile" || name === "WriteFile")) {
       this.revision++; this.changedFiles.add(result.metadata?.filePath ?? String(args.file_path));
     }
-    if (name === "Bash" && (args.purpose === "verification" || isVerificationCommand(String(args.command)))) {
+    if (name === "Bash" && (args.purpose === "verification" || verificationCommandKind(String(args.command)))) {
       const code = result.metadata?.exitCode;
       const status = code === undefined || code === null ? "blocked" : result.isError || code !== 0 ? "failed" : "passed";
       this.verifications.push({ command: String(args.command), revision: this.revision, status, exitCode: code ?? null,
@@ -57,6 +65,9 @@ export class TaskDelivery {
   async continuation(): Promise<string | undefined> {
     if (!this.actionRequested || this.reminded || this.denied) return;
     const latest = this.verifications.at(-1);
+    const lowRiskEdit = /文案|错别字|标点|提示词|注释|copy edit|typo/i.test(this.goal)
+      && !/权限|存储|执行链路|接口|数据迁移|安全|permission|persistence|migration/i.test(this.goal);
+    if (this.revision && latest?.status !== "failed" && (verificationProhibited(this.goal) || lowRiskEdit && !inspectionRequestsChecks(this.goal) && !latest)) return;
     if (this.toolCount > 0 && latest?.status !== "failed" && (!this.revision || latest?.status === "passed" && latest.revision === this.revision)) return;
     this.reminded = true;
     const checks = await projectChecks(this.workDir);
@@ -71,14 +82,10 @@ export class TaskDelivery {
     const status = forced ?? (this.denied || this.actionRequested && !this.toolCount ? "blocked" : this.toolCount > 0 && !this.successfulTools ? "failed" : latest?.status === "failed" ? "failed"
       : this.revision && (latest?.status !== "passed" || latest.revision !== this.revision) ? "unverified" : "completed");
     const labels: Record<DeliveryStatus, string> = { completed: "执行已结束；业务目标仍需核对实际结果", unverified: "已修改，但尚未取得最新改动的验证通过记录", failed: "验证失败，仍有未解决问题", blocked: "执行或验证受阻，未宣称完成", cancelled: "任务已取消，已生效的修改保留", budget_exhausted: "执行预算已用尽，可核对现场后继续" };
-    return { status, changedFiles: [...this.changedFiles], initialDirtyFiles: [...this.initialDirtyFiles], verifications: [...this.verifications], message: this.readOnlyInspection && status === "completed" ? "改动查看结束" : labels[status] };
+    return { status, changedFiles: [...this.changedFiles], initialDirtyFiles: [...this.initialDirtyFiles], verifications: [...this.verifications], message: this.readOnlyInspection && status === "completed" ? "改动查看结束" : labels[status], successfulTools: this.successfulTools, unknownEffects: this.unknownEffects };
   }
 }
 
-export function isVerificationCommand(command: string): boolean {
-  return /^(?:pnpm(?:\.cmd)?|npm(?:\.cmd)?)\s+(?:run\s+)?(?:test|typecheck|build|lint)(?:\s+[^;&|]*)?$/.test(command.trim())
-    || /^node\s+--test(?:\s+[^;&|]*)?$/.test(command.trim());
-}
 export async function projectChecks(workDir: string): Promise<string[]> {
   try {
     const document: unknown = JSON.parse(await readFile(join(workDir, "package.json"), "utf8"));

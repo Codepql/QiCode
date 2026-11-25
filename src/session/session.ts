@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import type { ConversationBlock } from "../conversation/types.js";
+import type { ConversationBlock, ToolResultBlock } from "../conversation/types.js";
 import { withFileLocksSync } from "../fs/file-access.js";
 import { atomicWriteFile } from "../fs/atomic-write.js";
 
@@ -213,7 +213,7 @@ export function hasStructuredMessages(saved: readonly SessionMessage[]): boolean
 
 function replayStructured(saved: readonly SessionMessage[]): RestoredMessage[] {
   const messages: RestoredMessage[] = [];
-  const outcomes = new Map<string, { output: string; isError: boolean } | null>();
+  const outcomes = new Map<string, ToolResultBlock | null>();
   let report = "";
   for (const entry of saved) {
     if (entry.type === "messages_v2") {
@@ -232,7 +232,19 @@ function replayStructured(saved: readonly SessionMessage[]): RestoredMessage[] {
         const payload: unknown = JSON.parse(entry.content);
         if (isRecord(payload) && typeof payload.id === "string") {
           if (entry.type === "tool_intent_v2") outcomes.set(payload.id, null);
-          else if (isRecord(payload.result) && typeof payload.result.output === "string" && typeof payload.result.isError === "boolean") outcomes.set(payload.id, { output: payload.result.output, isError: payload.result.isError });
+          else if (isRecord(payload.result) && typeof payload.result.output === "string" && typeof payload.result.isError === "boolean") {
+            const metadata = isRecord(payload.result.metadata) ? payload.result.metadata : undefined;
+            const exitCode = typeof metadata?.exitCode === "number" && Number.isSafeInteger(metadata.exitCode) ? metadata.exitCode : undefined;
+            const logPath = typeof metadata?.logPath === "string" ? metadata.logPath : undefined;
+            outcomes.set(payload.id, {
+              type: "tool_result", toolUseId: payload.id, content: payload.result.output, isError: payload.result.isError,
+              ...(exitCode !== undefined || logPath !== undefined ? { display: {
+                ...(exitCode === undefined ? {} : { exitCode }),
+                ...(logPath === undefined ? {} : { logPath }),
+              } } : {}),
+              ...(metadata?.status === "unknown" ? { executionState: "unknown" as const } : {}),
+            });
+          }
         }
       } catch { /* Missing or damaged outcome is unknown, never safe to replay. */ }
     } else if (entry.type === "delivery_v2") report = entry.content;
@@ -245,9 +257,9 @@ function replayStructured(saved: readonly SessionMessage[]): RestoredMessage[] {
   }
   if (pending.size) messages.push({ role: "user", content: [...pending].map(([id, name]) => {
     const result = outcomes.get(id);
-    return { type: "tool_result" as const, toolUseId: id, isError: result?.isError ?? true,
-      ...(result ? {} : { executionState: outcomes.has(id) ? "unknown" as const : "not_executed" as const }),
-      content: result?.output ?? (outcomes.has(id) ? `工具 ${name} 曾开始但结果未知；请核对磁盘/进程，禁止自动重放副作用。` : `工具 ${name} 未开始执行；请重新判断下一步。`) };
+    return result ?? { type: "tool_result" as const, toolUseId: id, isError: true,
+      executionState: outcomes.has(id) ? "unknown" as const : "not_executed" as const,
+      content: outcomes.has(id) ? `工具 ${name} 曾开始但结果未知；请核对磁盘/进程，禁止自动重放副作用。` : `工具 ${name} 未开始执行；请重新判断下一步。` };
   }) });
   if (pending.size || report) {
     const reminder: RestoredMessage = { role: "user", content: [{ type: "text", text: `<system-reminder>\n已恢复结构化工作现场。先核对当前磁盘与任务剩余步骤；恢复不意味着旧命令仍在运行。${report ? `\n上次交付记录（历史事实，未证明当前文件仍一致）：${report}` : ""}\n</system-reminder>` }] };
@@ -348,6 +360,9 @@ function isConversationBlock(value: unknown): value is ConversationBlock {
     && typeof value.toolUseId === "string"
     && typeof value.content === "string"
     && typeof value.isError === "boolean"
+    && (value.display === undefined || isRecord(value.display)
+      && (value.display.exitCode === undefined || Number.isSafeInteger(value.display.exitCode))
+      && (value.display.logPath === undefined || typeof value.display.logPath === "string"))
     && (value.evidence === undefined || isRecord(value.evidence) && typeof value.evidence.path === "string" && typeof value.evidence.version === "string"
       && [value.evidence.startLine, value.evidence.endLine, value.evidence.totalLines].every((amount) => Number.isSafeInteger(amount) && Number(amount) >= 0)
       && Number(value.evidence.startLine) <= Number(value.evidence.endLine) && Number(value.evidence.endLine) <= Number(value.evidence.totalLines));

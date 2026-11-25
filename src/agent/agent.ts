@@ -41,6 +41,10 @@ import { buildConversation } from "../toolresult/reconstruct.js";
 import { ContentReplacementState } from "../toolresult/state.js";
 import { buildActiveSkillsReminder } from "../skills/executor.js";
 import { BashTool } from "../tools/bash.js";
+import { ReadFileTool } from "../tools/read-file.js";
+import { GlobTool } from "../tools/glob.js";
+import { GrepTool } from "../tools/grep.js";
+import { ToolSearchTool } from "../tools/tool-search.js";
 import { HookCommandActionExecutor, type HookCommandRequest } from "../hooks/command-action.js";
 import { HookEngine } from "../hooks/engine.js";
 import { HookHttpActionExecutor, type HookHttpRequest } from "../hooks/http-action.js";
@@ -49,8 +53,9 @@ import { fetchSafeText } from "../security/safe-fetch.js";
 import { StreamingExecutor } from "./streaming-executor.js";
 import type { AgentEvent } from "./events.js";
 import { DEFAULT_EXECUTION, ApprovalClock, TaskBudget, awaitWithSignal, abortableDelay, withIdleTimeout, type ExecutionSettings } from "./execution.js";
-import { TaskDelivery } from "./delivery.js";
-import { inspectionReminder, inspectionRequestsChecks } from "./task-intent.js";
+import { TaskDelivery, type DeliveryReport } from "./delivery.js";
+import { explicitReadOnly, inspectionReminder, inspectionRequestsChecks, verificationCommandKind, verificationProhibited } from "./task-intent.js";
+import { readOnlyGitCommand } from "../permissions/git-readonly.js";
 import { taskApprovalEligible } from "../permissions/task-approval.js";
 import { withEvents } from "./event-queue.js";
 
@@ -75,6 +80,7 @@ export interface AgentConfig {
   maxOutput?: number;
   execution?: Partial<ExecutionSettings>;
   trackDelivery?: boolean;
+  userGoal?: string;
   onToolStart?: ToolContext["onToolStart"];
   onToolEnd?: ToolContext["onToolEnd"];
   fileHistory?: FileHistory;
@@ -84,7 +90,7 @@ export interface AgentConfig {
   toolFilter?: (toolName: string) => boolean;
   hookEngine?: HookEngine;
   transientReminders?: () => readonly string[];
-  takeSteering?: () => readonly string[];
+  takeSteering?: () => readonly (string | { goal: string; text: string })[];
   checker: PermissionChecker;
   onPermissionRequest?: (
     toolName: string,
@@ -116,6 +122,7 @@ export class Agent {
   readonly #executedIds = new Set<string>();
   readonly #instructionPaths = new Set<string>();
   readonly #failureCounts = new Map<string, number>();
+  #repeatedReadCount = 0;
   readonly #uncertainOperations = new Set<string>();
   #taskApproved = false;
   readonly approvalClock: ApprovalClock;
@@ -134,7 +141,7 @@ export class Agent {
     this.metrics = config.metrics ?? new RunMetrics({ model: config.provider.config.model, protocol: config.provider.config.protocol, contextWindow: this.effectiveBudget.contextWindow, maxOutput: this.effectiveBudget.maxOutput, budgetSource: this.effectiveBudget.source });
     this.#signal = config.abortSignal ?? new AbortController().signal;
     const prompt = config.conversation.getMessages().filter((message) => message.role === "user" && !Conversation.visibleText(message).startsWith("<system-reminder>")).at(-1);
-    this.#delivery = new TaskDelivery(prompt ? Conversation.visibleText(prompt) : "", config.workDir, config.checker.mode === "plan");
+    this.#delivery = new TaskDelivery(config.userGoal ?? (prompt ? Conversation.visibleText(prompt) : ""), config.workDir, config.checker.mode === "plan", this.metrics);
     for (const source of discoverInstructions(config.workDir)) this.#instructionPaths.add(source.path);
     const calls = new Map<string, ToolUseBlock>();
     for (const message of config.conversation.getMessages()) for (const block of message.content) {
@@ -153,12 +160,29 @@ export class Agent {
   }
 
   async *run(): AsyncGenerator<AgentEvent> {
+    let delivery: DeliveryReport | undefined;
     try {
       for await (const event of this.runLoop()) {
-        if (event.type === "loop_complete") this.metrics.outcome = event.stopReason ?? "completed";
+        if (event.type === "delivery") { delivery = event.report; continue; }
+        if (event.type === "loop_complete") {
+          this.metrics.outcome = event.stopReason ?? "completed";
+          const reason = event.stopReason;
+          if (this.config.trackDelivery) {
+            const report = delivery ?? this.#delivery.report(reason === "interrupted" ? "cancelled" : reason === "task_timeout" ? "budget_exhausted" : "blocked");
+            yield { type: "delivery", report: { ...report, ...(reason !== undefined ? { stopReason: reason } : {}) } };
+          }
+        }
         yield event;
       }
-    } catch (error) { this.metrics.outcome = this.#budget?.controller.signal.aborted ? "task_timeout" : this.#signal.aborted ? "interrupted" : "error"; throw error; }
+    } catch (error) {
+      const reason = this.#budget?.controller.signal.aborted ? "task_timeout" : this.#signal.aborted ? "interrupted" : "error";
+      this.metrics.outcome = reason;
+      if (reason === "error") throw error;
+      if (this.config.trackDelivery) {
+        yield { type: "delivery", report: { ...this.#delivery.report(reason === "task_timeout" ? "budget_exhausted" : "cancelled"), stopReason: reason } };
+      }
+      yield { type: "loop_complete", stopReason: reason };
+    }
     finally { if (this.config.finishMetrics !== false) this.metrics.finish(); }
   }
 
@@ -291,6 +315,7 @@ export class Agent {
       if (response.stopReason === "length" || response.stopReason === "max_tokens") {
         yield { type: "stream_reset" };
         if (++truncations > this.#settings.maxProviderRetries) {
+          this.commitAssistant(response, false);
           yield { type: "error", message: "模型输出连续截断；未执行该响应中的工具，请缩小任务或提高输出预算。" };
           yield { type: "loop_complete", stopReason: "length" }; return;
         }
@@ -362,11 +387,11 @@ export class Agent {
     }
   }
 
-  private async consumeSteering(messages: readonly string[]): Promise<void> {
+  private async consumeSteering(messages: readonly (string | { goal: string; text: string })[]): Promise<void> {
     const wasReadOnly = this.#delivery.readOnlyInspection;
     for (const message of messages) {
-      this.config.conversation.addUserMessage(message);
-      this.#delivery.goal += `\n${message}`;
+      this.config.conversation.addUserMessage(typeof message === "string" ? message : message.text);
+      this.#delivery.goal += `\n${typeof message === "string" ? message : message.goal}`;
     }
     if (wasReadOnly && !this.#delivery.readOnlyInspection && this.config.trackDelivery) await this.#delivery.initialize();
   }
@@ -499,10 +524,17 @@ export class Agent {
     checker: PermissionChecker,
   ): AsyncGenerator<AgentEvent> {
     const results: ToolExecution[] = [];
+    const hooks = this.config.hookEngine;
+    const observeAfterHooks = this.config.trackDelivery && hooks?.mayHaveSideEffects("post_tool_use");
 
     for (const batch of createExecutionBatches(toolUses, this.config.registry)) {
       const batchResults = yield* withEvents<AgentEvent, ToolExecution[]>((emit) => this.executeBatch(batch, checker, emit));
-      if (this.config.trackDelivery) await this.#delivery.observe(new Set(batchResults.filter((result) => !result.result.isError && (result.toolName === "EditFile" || result.toolName === "WriteFile")).map((result) => {
+      const readOnlyBatch = batchResults.every((result) => {
+        const tool = this.config.registry.get(result.toolName);
+        const implementation = tool?.constructor;
+        return result.result.metadata?.status !== "unknown" && (implementation === ReadFileTool || implementation === GlobTool || implementation === GrepTool || implementation === ToolSearchTool);
+      });
+      if (this.config.trackDelivery && (!readOnlyBatch || hooks?.mayHaveSideEffects() && !observeAfterHooks)) await this.#delivery.observe(new Set(batchResults.filter((result) => !result.result.isError && (result.toolName === "EditFile" || result.toolName === "WriteFile")).map((result) => {
         const args = batch.find((call) => call.id === result.toolId)!.input;
         return resolve(this.config.workDir, String(args.file_path));
       })));
@@ -510,6 +542,16 @@ export class Agent {
         const call = batch.find((item) => item.id === result.toolId);
         if (call) this.#delivery.record(result.toolName, call.input, result.result);
       }
+      for (const result of batchResults) {
+        const call = batch.find((item) => item.id === result.toolId);
+        await this.fireHook("post_tool_use", {
+          toolName: result.toolName,
+          ...(call ? { args: call.input, ...hookFilePath(call.input) } : {}),
+          message: result.result.output,
+        });
+      }
+      // A verification only covers the workspace observed before post-tool hooks run.
+      if (observeAfterHooks) await this.#delivery.observe(new Set());
       results.push(...batchResults);
     }
 
@@ -519,6 +561,10 @@ export class Agent {
       toolUseId: result.toolId,
       content: result.result.output,
       isError: result.result.isError,
+      ...(typeof result.result.metadata?.exitCode === "number" || result.result.metadata?.logPath ? { display: {
+        ...(typeof result.result.metadata.exitCode === "number" ? { exitCode: result.result.metadata.exitCode } : {}),
+        ...(result.result.metadata.logPath ? { logPath: result.result.metadata.logPath } : {}),
+      } } : {}),
       ...(result.result.metadata?.status === "unknown" ? { executionState: "unknown" as const } : {}),
       ...(result.result.metadata?.read && result.result.metadata.filePath ? { evidence: { path: relative(this.config.workDir, result.result.metadata.filePath).replaceAll("\\", "/"), ...result.result.metadata.read } } : {}),
     }));
@@ -529,16 +575,10 @@ export class Agent {
       if (toolUse && result.result.isError) {
         const signature = createHash("sha256").update(JSON.stringify([this.#delivery.revision, result.toolName, toolUse.input, result.result.metadata?.exitCode ?? result.result.output.replace(/日志：[^\n]*/g, "日志：[已保留]")])).digest("hex");
         this.#failureCounts.set(signature, (this.#failureCounts.get(signature) ?? 0) + 1);
-        if (this.#failureCounts.get(signature)! >= 3) {
+        if (this.#failureCounts.get(signature) === 3) {
           this.config.conversation.addSystemReminder("相同工具错误已重复三次且没有有效进展。不要重试相同参数，请改用其他方案，或明确说明阻塞原因。");
         }
       }
-      await this.fireHook("post_tool_use", {
-        toolName: result.toolName,
-        ...(toolUse === undefined ? {} : { args: toolUse.input }),
-        ...(toolUse === undefined ? {} : hookFilePath(toolUse.input)),
-        message: result.result.output,
-      });
       yield {
         type: "tool_result",
         toolId: result.toolId,
@@ -580,11 +620,21 @@ export class Agent {
       },
     });
     const executions = new Map<string, ToolExecution>();
+    const goal = this.#delivery.goal;
+    const readOnlyInspection = this.#delivery.readOnlyInspection;
+    const strictReadOnly = explicitReadOnly(goal);
 
     for (const toolUse of toolUses) {
       const tool = this.config.registry.get(toolUse.name);
-      if (this.#delivery.readOnlyInspection && (tool?.category === "write" || toolUse.name === "Bash" && !inspectionRequestsChecks(this.#delivery.goal) && /^\s*(?:pnpm|npm)(?:\.cmd)?\s+(?:run\s+)?(?:test|build|typecheck|benchmark(?::[\w-]+)?)(?:\s|$)/i.test(String(toolUse.input.command)))) {
-        executions.set(toolUse.id, { toolId: toolUse.id, toolName: toolUse.name, elapsed: 0, result: { output: "本次只查看改动，未请求修改或运行验证；该工具未执行。请依据已读取内容总结，注明未运行测试。", isError: true, metadata: { status: "not_executed" } } });
+      const command = toolUse.name === "Bash" ? String(toolUse.input.command ?? "").trim() : "";
+      const kind = verificationCommandKind(command);
+      const verificationAllowed = kind !== undefined && inspectionRequestsChecks(goal, kind);
+      const verification = toolUse.name === "Bash" && (kind !== undefined || toolUse.input.purpose === "verification" || command.split(/[;&|\r\n]+/).some(verificationCommandKind));
+      const readOnlyCommand = toolUse.name === "Bash" && (readOnlyGitCommand(command) !== undefined || /^git status(?: --short)?$/.test(command));
+      if (verification && (verificationProhibited(goal, kind) || readOnlyInspection && !verificationAllowed)
+          || readOnlyInspection && tool?.category === "write"
+          || strictReadOnly && !["ReadFile", "Glob", "Grep", "ToolSearch"].includes(toolUse.name) && !readOnlyCommand && !verificationAllowed) {
+        executions.set(toolUse.id, { toolId: toolUse.id, toolName: toolUse.name, elapsed: 0, result: { output: "该操作超出用户指定的修改或验证范围，未执行。请按已授权的范围继续，并如实说明验证情况。", isError: true, metadata: { status: "not_executed" } } });
         continue;
       }
       const target = typeof toolUse.input.file_path === "string" ? resolve(this.config.workDir, toolUse.input.file_path) : undefined;
@@ -778,6 +828,7 @@ export class Agent {
     args: Record<string, unknown>,
     context: HookContext,
   ): Promise<{ output: string; isError: boolean } | undefined> {
+    if (explicitReadOnly(this.#delivery.goal)) return { output: "只读任务未执行外部 Hook 操作。", isError: true };
     const decision = this.#checker.check(toolName, "command", args);
     if (decision.effect === "deny") return { output: `Permission denied: ${decision.reason}`, isError: true };
     if (decision.effect === "allow") return undefined;
@@ -827,6 +878,9 @@ export class Agent {
             const kind = previous.length && previous.at(-1)?.version !== read.version ? "changed" : same.some((entry) => entry.startLine <= read.startLine && entry.endLine >= read.endLine) ? "repeat" : same.some((entry) => entry.endLine >= read.startLine && entry.startLine <= read.endLine) ? "overlap" : "new";
             const evidence: ReadEvidence = { path: relative(this.config.workDir, absolutePath).replaceAll("\\", "/"), ...read, toolId: toolUse.id, kind };
             this.metrics.read(evidence); this.#readEvidence.set(absolutePath, [...(kind === "changed" ? [] : previous), evidence].slice(-128));
+            if (this.#delivery.readOnlyInspection && kind === "repeat" && ++this.#repeatedReadCount === 3) {
+              this.config.conversation.addSystemReminder("本次只读任务已经多次读取相同版本及范围。优先使用已有证据。若还缺关键事实，只查缺失的位置，否则交付结论并注明未覆盖部分。");
+            }
           }
           this.#recoveryState.recordFileRead(absolutePath, result.result.output, read);
         }
