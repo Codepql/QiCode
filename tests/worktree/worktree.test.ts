@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -114,7 +114,12 @@ describe("Worktree lifecycle", () => {
 
     const created = await enter.execute({ slug: "tool-check" }, { workDir: repository });
     expect(created.isError).toBe(false);
-    const path = join(repository, ".QiCode", "worktrees", "tool-check");
+    let root = repository;
+    if (process.platform !== "win32") {
+      root = join(repository, ".QiCode", "root-alias");
+      await symlink(repository, root, "dir");
+    }
+    const path = join(root, ".QiCode", "worktrees", "tool-check");
     const exit = new ExitWorktreeTool();
     await expect(exit.execute({
       path,
@@ -128,7 +133,7 @@ describe("Worktree lifecycle", () => {
 });
 
 async function createFixtureRepository(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "qicode-worktree-"));
+  const root = await realpath(await mkdtemp(join(tmpdir(), "qicode-worktree-")));
   await git(root, ["init", "-b", "main"]);
   await git(root, ["config", "user.email", "qicode@example.test"]);
   await git(root, ["config", "user.name", "QiCode Test"]);

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -245,11 +245,16 @@ describe("InstallSkillTool", () => {
 
   it("installs a local Skill atomically, reloads the catalog, and honors a name override", async () => {
     const workDir = mkdtempSync(join(tmpdir(), "qicode-install-"));
-    const source = join(workDir, "template.md");
+    let root = workDir;
+    if (process.platform !== "win32") {
+      root = join(workDir, "workspace-alias");
+      symlinkSync(workDir, root, "dir");
+    }
+    const source = join(root, "template.md");
     writeFileSync(source, SKILL_TEXT, "utf8");
     const catalog = new SkillCatalog();
     const installed: string[] = [];
-    const tool = new InstallSkillTool(workDir, catalog, (name) => installed.push(name));
+    const tool = new InstallSkillTool(root, catalog, (name) => installed.push(name));
 
     const result = await tool.execute({ source, name: "review-api" }, { workDir });
     const target = join(workDir, ".QiCode", "skills", "review-api", "SKILL.md");

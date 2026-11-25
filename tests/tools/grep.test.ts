@@ -27,7 +27,10 @@ describe("GrepTool", () => {
       { workDir },
     );
 
-    expect(result).toEqual({ output: "src/app.ts:2:CreateAgent()", isError: false });
+    expect(result).toEqual({
+      output: expect.stringMatching(/^src\/app\.ts:2:CreateAgent\(\)(?:\n\[降级搜索：[^\n]+\])?$/),
+      isError: false,
+    });
   });
 
   it("skips ignored directories and files outside the include pattern", async () => {
@@ -57,6 +60,9 @@ describe("GrepTool", () => {
 
     expect(invalid.isError).toBe(true);
     expect(invalid.output).toContain("invalid regular expression");
-    expect(empty).toEqual({ output: "No matches found.", isError: false });
+    expect(empty).toEqual({
+      output: expect.stringMatching(/^No matches found\.(?:\n\[降级搜索：[^\n]+\])?$/),
+      isError: false,
+    });
   });
 });

@@ -117,7 +117,7 @@ describe("first-phase terminal interactions", () => {
     expect(view.lastFrame()).not.toContain("new output");
     view.stdin.write("\u001b[1;5F"); await tick();
     expect(view.lastFrame()).toContain("new output");
-  });
+  }, 15_000); // This test waits for over 100 separate renders on Windows CI.
 
   it("restores the unsent draft after browsing input history", async () => {
     const submit = vi.fn();
